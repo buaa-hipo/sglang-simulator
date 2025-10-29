@@ -46,6 +46,13 @@ def Engine(*args, **kwargs):
     return Engine(*args, **kwargs)
 
 
+def EngineSim(*args, **kwargs):
+    # Avoid importing unnecessary dependency
+    from sglang.srt.entrypoints.engine import EngineSim
+
+    return EngineSim(*args, **kwargs)
+
+
 def set_default_backend(backend: BaseBackend):
     global_config.default_backend = backend
 

@@ -1652,3 +1652,344 @@ def monkey_patch_vllm_parallel_state(reverse: bool = False):
         setattr(vllm_parrlel_state, "get_pp_group", get_pp_group)
         setattr(vllm_parrlel_state, "get_tp_group", get_tp_group)
         setattr(vllm_parrlel_state, "get_world_group", get_world_group)
+
+
+def init_distributed_environment_sim(
+    world_size: int = -1,
+    rank: int = -1,
+    distributed_init_method: str = "env://",
+    local_rank: int = -1,
+    backend: str = "nccl",
+    timeout: Optional[int] = None,
+):
+    logger.debug(
+        "world_size=%d rank=%d local_rank=%d " "distributed_init_method=%s backend=%s",
+        world_size,
+        rank,
+        local_rank,
+        distributed_init_method,
+        backend,
+    )
+    if not torch.distributed.is_initialized():
+        assert distributed_init_method is not None, (
+            "distributed_init_method must be provided when initializing "
+            "distributed environment"
+        )
+        if timeout is not None:
+            assert isinstance(timeout, (int)), "timeout must be a number"
+            assert timeout > 0, "timeout must be positive"
+            timeout = timedelta(seconds=timeout)
+
+        # this backend is used for WORLD
+        torch.distributed.init_process_group(
+            backend=backend,
+            init_method=distributed_init_method,
+            world_size=world_size,
+            rank=rank,
+            timeout=timeout,
+        )
+
+    # set the local rank
+    # local_rank is not available in torch ProcessGroup,
+    # see https://github.com/pytorch/pytorch/issues/122816
+    if local_rank == -1:
+        # local rank not set, this usually happens in single-node
+        # setting, where we can use rank as local rank
+        if distributed_init_method == "env://":
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        else:
+            local_rank = rank
+    global _WORLD
+    if _WORLD is None:
+        ranks = list(range(torch.distributed.get_world_size()))
+        _WORLD = init_world_group(ranks, local_rank, backend)
+    else:
+        assert (
+            _WORLD.world_size == torch.distributed.get_world_size()
+        ), "world group already initialized with a different world size"
+
+
+class GroupCoordinatorSim(GroupCoordinator):
+    def __init__(
+        self,
+        group_ranks: List[List[int]],
+        local_rank: int,
+        torch_distributed_backend: Union[str, Backend],
+        use_pynccl: bool,
+        use_pymscclpp: bool,
+        use_custom_allreduce: bool,
+        use_hpu_communicator: bool,
+        use_xpu_communicator: bool,
+        use_npu_communicator: bool,
+        use_message_queue_broadcaster: bool = False,
+        group_name: Optional[str] = None,
+    ):
+        group_name = group_name or "anonymous"
+        self.unique_name = _get_unique_name(group_name)
+        _register_group(self)
+
+        self.rank = torch.distributed.get_rank()
+        self.local_rank = local_rank
+        self.device_group = None
+        self.cpu_group = None
+        self.local_size = get_int_env_var("LOCAL_SIZE", 0)
+
+        for ranks in group_ranks:
+            device_group = torch.distributed.new_group(
+                ranks, backend=torch_distributed_backend
+            )
+            # a group with `gloo` backend, to allow direct coordination between
+            # processes through the CPU.
+            cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            if self.rank in ranks:
+                self.ranks = ranks
+                self.world_size = len(ranks)
+                self.rank_in_group = ranks.index(self.rank)
+                self.device_group = device_group
+                self.cpu_group = cpu_group
+
+        assert self.cpu_group is not None
+        assert self.device_group is not None
+
+        if is_cuda_alike():
+            self.device = torch.device(f"cuda:{local_rank}")
+        else:
+            self.device = torch.device("cpu")
+
+        self.use_pynccl = use_pynccl
+        self.use_pymscclpp = use_pymscclpp
+        self.use_custom_allreduce = use_custom_allreduce
+        self.use_hpu_communicator = use_hpu_communicator
+        self.use_xpu_communicator = use_xpu_communicator
+        self.use_npu_communicator = use_npu_communicator
+        self.use_message_queue_broadcaster = use_message_queue_broadcaster
+
+        # lazy import to avoid documentation build error
+        from sglang.srt.distributed.device_communicators.custom_all_reduce import (
+            CustomAllreduce,
+        )
+        from sglang.srt.distributed.device_communicators.pynccl import (
+            PyNcclCommunicator,
+        )
+
+        if is_hip():
+            from sglang.srt.distributed.device_communicators.quick_all_reduce import (
+                QuickAllReduce,
+                qr_rocm_arch_available,
+            )
+
+        self.pynccl_comm: Optional[PyNcclCommunicator] = None
+        if use_pynccl and self.world_size > 1:
+            self.pynccl_comm = PyNcclCommunicator(
+                group=self.cpu_group,
+                device=self.device,
+            )
+
+        from sglang.srt.distributed.device_communicators.pymscclpp import (
+            PyMscclppCommunicator,
+        )
+
+        self.pymscclpp_comm: Optional[PyMscclppCommunicator] = None
+        if use_pymscclpp and self.world_size > 1:
+            self.pymscclpp_comm = PyMscclppCommunicator(
+                group=self.cpu_group,
+                device=self.device,
+            )
+
+        self.ca_comm: Optional[CustomAllreduce] = None
+        self.qr_comm: Optional[QuickAllReduce] = None
+        if use_custom_allreduce and self.world_size > 1:
+            # Initialize a custom fast all-reduce implementation.
+            try:
+                self.ca_comm = CustomAllreduce(
+                    group=self.cpu_group,
+                    device=self.device,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Setup Custom allreduce failed with {e}. To silence this "
+                    "warning, specify --disable-custom-all-reduce explicitly."
+                )
+            if is_hip():
+                try:
+                    # Initialize a custom quick all-reduce implementation for AMD
+                    # when rocm >= gfx942. Quick reduce is designed as a
+                    # complement to custom allreduce.
+                    # Based on quickreduce (https://github.com/mk1-project/quickreduce).
+                    if qr_rocm_arch_available():
+                        self.qr_comm = QuickAllReduce(
+                            group=self.cpu_group, device=self.device
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to initialize QuickAllReduce: {e}")
+
+        from sglang.srt.distributed.device_communicators.hpu_communicator import (
+            HpuCommunicator,
+        )
+
+        self.hpu_communicator: Optional[HpuCommunicator] = None
+        if use_hpu_communicator and self.world_size > 1:
+            self.hpu_communicator = HpuCommunicator(group=self.device_group)
+
+        from sglang.srt.distributed.device_communicators.xpu_communicator import (
+            XpuCommunicator,
+        )
+
+        self.xpu_communicator: Optional[XpuCommunicator] = None
+        if use_xpu_communicator and self.world_size > 1:
+            self.xpu_communicator = XpuCommunicator(group=self.device_group)
+
+        from sglang.srt.distributed.device_communicators.npu_communicator import (
+            NpuCommunicator,
+        )
+
+        self.npu_communicator: Optional[NpuCommunicator] = None
+        if use_npu_communicator and self.world_size > 1:
+            self.npu_communicator = NpuCommunicator(group=self.device_group)
+
+        from sglang.srt.distributed.device_communicators.shm_broadcast import (
+            MessageQueue,
+        )
+
+        self.mq_broadcaster: Optional[MessageQueue] = None
+        if use_message_queue_broadcaster and self.world_size > 1:
+            self.mq_broadcaster = MessageQueue.create_from_process_group(
+                self.cpu_group, 1 << 22, 6
+            )
+
+
+def initialize_model_parallel_sim(
+    tensor_model_parallel_size: int = 1,
+    expert_model_parallel_size: int = 1,
+    pipeline_model_parallel_size: int = 1,
+    backend: Optional[str] = None,
+    duplicate_tp_group: bool = False,
+) -> None:
+    """
+    Initialize model parallel groups.
+
+    Arguments:
+        tensor_model_parallel_size: number of GPUs used for tensor model
+            parallelism.
+        pipeline_model_parallel_size: number of GPUs used for pipeline model
+            parallelism.
+
+    Let's say we have a total of 8 GPUs denoted by g0 ... g7 and we
+    use 2 GPUs to parallelize the model tensor, and 4 GPUs to parallelize
+    the model pipeline. The present function will
+    create 4 tensor model-parallel groups and 2 pipeline model-parallel groups:
+        4 tensor model-parallel groups:
+            [g0, g1], [g2, g3], [g4, g5], [g6, g7]
+        2 pipeline model-parallel groups:
+            [g0, g2, g4, g6], [g1, g3, g5, g7]
+    Note that for efficiency, the caller should make sure adjacent ranks
+    are on the same DGX box. For example if we are using 2 DGX-1 boxes
+    with a total of 16 GPUs, rank 0 to 7 belong to the first box and
+    ranks 8 to 15 belong to the second box.
+    """
+    # Get world size and rank. Ensure some consistencies.
+    assert torch.distributed.is_initialized()
+    world_size: int = torch.distributed.get_world_size()
+    backend = backend or torch.distributed.get_backend(get_world_group().device_group)
+
+    if world_size != tensor_model_parallel_size * pipeline_model_parallel_size:
+        raise RuntimeError(
+            f"world_size ({world_size}) is not equal to "
+            f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
+            f"pipeline_model_parallel_size ({pipeline_model_parallel_size})"
+        )
+
+    # Build the tensor model-parallel groups.
+    num_tensor_model_parallel_groups: int = world_size // tensor_model_parallel_size
+    global _TP
+    assert _TP is None, "tensor model parallel group is already initialized"
+    group_ranks = []
+    for i in range(num_tensor_model_parallel_groups):
+        ranks = list(
+            range(i * tensor_model_parallel_size, (i + 1) * tensor_model_parallel_size)
+        )
+        group_ranks.append(ranks)
+
+    # message queue broadcaster is only used in tensor model parallel group
+    _TP = init_model_parallel_group(
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        use_message_queue_broadcaster=get_bool_env_var(
+            "SGLANG_USE_MESSAGE_QUEUE_BROADCASTER", "true"
+        ),
+        group_name="tp",
+    )
+
+    if duplicate_tp_group:
+        global _PDMUX_PREFILL_TP_GROUP
+        assert (
+            _PDMUX_PREFILL_TP_GROUP is None
+        ), "tensor model parallel group for PD-Multiplexing Prefill is already initialized"
+        _PDMUX_PREFILL_TP_GROUP = init_model_parallel_group(
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            use_message_queue_broadcaster=get_bool_env_var(
+                "SGLANG_USE_MESSAGE_QUEUE_BROADCASTER", "true"
+            ),
+            group_name="pdmux_prefill_tp",
+        )
+        _TP.pynccl_comm.disabled = False
+        _PDMUX_PREFILL_TP_GROUP.pynccl_comm.disabled = False
+
+    moe_ep_size = expert_model_parallel_size
+
+    moe_tp_size = tensor_model_parallel_size // moe_ep_size
+    global _MOE_EP
+    assert _MOE_EP is None, "expert model parallel group is already initialized"
+    group_ranks = []
+    for i in range(num_tensor_model_parallel_groups):
+        for j in range(moe_tp_size):
+            st = i * tensor_model_parallel_size + j
+            en = (i + 1) * tensor_model_parallel_size + j
+            ranks = list(range(st, en, moe_tp_size))
+            group_ranks.append(ranks)
+
+    _MOE_EP = init_model_parallel_group(
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        use_custom_allreduce=False,
+        group_name="moe_ep",
+    )
+
+    global _MOE_TP
+    assert _MOE_TP is None, "expert model parallel group is already initialized"
+    group_ranks = []
+    for i in range(num_tensor_model_parallel_groups):
+        for j in range(moe_ep_size):
+            st = i * tensor_model_parallel_size + j * moe_tp_size
+            en = i * tensor_model_parallel_size + (j + 1) * moe_tp_size
+            ranks = list(range(st, en))
+            group_ranks.append(ranks)
+
+    _MOE_TP = init_model_parallel_group(
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        use_custom_allreduce=False,
+        group_name="moe_tp",
+    )
+
+    # Build the pipeline model-parallel groups.
+    num_pipeline_model_parallel_groups: int = world_size // pipeline_model_parallel_size
+    global _PP
+    assert _PP is None, "pipeline model parallel group is already initialized"
+    group_ranks = []
+    for i in range(num_pipeline_model_parallel_groups):
+        ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
+        group_ranks.append(ranks)
+    # pipeline parallel does not need custom allreduce
+    _PP = init_model_parallel_group(
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        use_custom_allreduce=False,
+        group_name="pp",
+    )

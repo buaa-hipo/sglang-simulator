@@ -35,6 +35,7 @@ from sglang.srt.distributed import (
     get_tp_group,
     get_world_group,
     init_distributed_environment,
+    init_distributed_environment_sim,
     initialize_model_parallel,
     set_custom_all_reduce,
     set_mscclpp_all_reduce,
@@ -58,6 +59,7 @@ from sglang.srt.layers.dp_attention import (
     get_attention_tp_group,
     get_attention_tp_size,
     initialize_dp_attention,
+    initialize_dp_attention_sim,
 )
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.layers.moe.utils import DeepEPMode, MoeA2ABackend
@@ -98,7 +100,7 @@ from sglang.srt.model_loader.utils import set_default_torch_dtype
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.patch_torch import monkey_patch_torch_reductions
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
-from sglang.srt.server_args import ServerArgs
+from sglang.srt.server_args import ServerArgs, SimBinds
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.utils import (
@@ -1899,3 +1901,196 @@ class LocalSerializedTensor:
 
     def get(self, rank: int):
         return MultiprocessingSerializer.deserialize(self.values[rank])
+
+
+class ModelRunnerSim(ModelRunner):
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        mem_fraction_static: float,
+        gpu_id: int,
+        tp_rank: int,
+        tp_size: int,
+        moe_ep_rank: int,
+        moe_ep_size: int,
+        pp_rank: int,
+        pp_size: int,
+        nccl_port: int,
+        server_args: ServerArgs,
+        sim_binds: SimBinds,
+        is_draft_worker: bool = False,
+        req_to_token_pool: Optional[ReqToTokenPool] = None,
+        token_to_kv_pool_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
+    ):
+        # Parse args
+        self.mem_fraction_static = mem_fraction_static
+        self.device = server_args.device
+        self.gpu_id = gpu_id
+        self.tp_rank = tp_rank
+        self.tp_size = tp_size
+        self.moe_ep_rank = moe_ep_rank
+        self.moe_ep_size = moe_ep_size
+        self.dp_size = server_args.dp_size
+        self.pp_rank = pp_rank
+        self.pp_size = pp_size
+        self.model_config = model_config
+        self.dist_port = nccl_port
+        self.server_args = server_args
+        self.is_draft_worker = is_draft_worker
+        self.is_generation = model_config.is_generation
+        self.is_multimodal = model_config.is_multimodal
+        self.is_multimodal_chunked_prefill_supported = (
+            model_config.is_multimodal_chunked_prefill_supported
+        )
+        self.spec_algorithm = SpeculativeAlgorithm.from_string(
+            server_args.speculative_algorithm
+        )
+        self.page_size = server_args.page_size
+        self.req_to_token_pool = req_to_token_pool
+        self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
+        self.is_hybrid = model_config.is_hybrid
+        self.use_mla_backend = self.model_config.attention_arch == AttentionArch.MLA
+        self.attention_chunk_size = model_config.attention_chunk_size
+        self.forward_pass_id = 0
+
+        # Apply the rank zero filter to logger
+        if not any(isinstance(f, RankZeroFilter) for f in logger.filters):
+            logger.addFilter(RankZeroFilter(tp_rank == 0))
+        if server_args.show_time_cost:
+            enable_show_time_cost()
+
+        # Model-specific adjustment
+        self.model_specific_adjustment()
+
+        # Global vars
+        global_server_args_dict.update(
+            {k: getattr(server_args, k) for k in GLOBAL_SERVER_ARGS_KEYS}
+            | {
+                # TODO it is indeed not a "server args"
+                "use_mla_backend": self.use_mla_backend,
+                "speculative_algorithm": self.spec_algorithm,
+                "moe_a2a_backend": MoeA2ABackend(server_args.moe_a2a_backend),
+                "deepep_mode": DeepEPMode(server_args.deepep_mode),
+            }
+        )
+
+        # CPU offload
+        set_cpu_offload_max_bytes(int(server_args.cpu_offload_gb * 1024**3))
+
+        # Init OpenMP threads binding for CPU
+        if self.device == "cpu":
+            self.init_threads_binding()
+
+        # Get memory before model loading
+        min_per_gpu_memory = self.init_torch_distributed()
+
+        # Update deep gemm configure
+        if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM:
+            deep_gemm_wrapper.update_deep_gemm_config(gpu_id, server_args)
+
+        # Initialize the model runner
+        self.initialize(min_per_gpu_memory)
+
+        # Temporary cached values
+        self.support_pp = (
+            "pp_proxy_tensors" in inspect.signature(self.model.forward).parameters
+        )
+
+        # For weight updates
+        self._model_update_group = {}
+
+    def init_torch_distributed(self):
+        logger.info("Init torch distributed begin.")
+
+        try:
+            torch.get_device_module(self.device).set_device(self.gpu_id)
+        except Exception:
+            logger.warning(
+                f"Context: {self.device=} {self.gpu_id=} {os.environ.get('CUDA_VISIBLE_DEVICES')=} {self.tp_rank=} {self.tp_size=}"
+            )
+            raise
+
+        if self.device == "cuda":
+            backend = "nccl"
+        elif self.device == "xpu":
+            backend = "xccl"
+        elif self.device == "hpu":
+            backend = "hccl"
+        elif self.device == "cpu":
+            backend = "gloo"
+        elif self.device == "npu":
+            backend = "hccl"
+
+        before_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
+        if not self.server_args.enable_p2p_check:
+            monkey_patch_p2p_access_check()
+
+        if self.server_args.dist_init_addr:
+            dist_init_method = f"tcp://{self.server_args.dist_init_addr}"
+        else:
+            dist_init_method = f"tcp://127.0.0.1:{self.dist_port}"
+        set_custom_all_reduce(not self.server_args.disable_custom_all_reduce)
+        set_mscclpp_all_reduce(self.server_args.enable_mscclpp)
+
+        if not self.is_draft_worker:
+            if self.device == "cpu":
+                if _is_cpu_amx_available:
+                    # Bind OpenMP threads to CPU cores
+                    torch.ops.sgl_kernel.init_cpu_threads_env(self.local_omp_cpuid)
+
+                    # Set local size to hint SGLang to use shared memory based AllReduce
+                    os.environ["LOCAL_SIZE"] = str(self.tp_size)
+                    torch.ops.sgl_kernel.initialize(self.tp_size, self.tp_rank)
+                else:
+                    logger.warning(
+                        "init_cpu_threads_env and shared memory based AllReduce is disabled since intel amx backend is not available"
+                    )
+
+            # Only initialize the distributed environment on the target model worker.
+            init_distributed_environment_sim(
+                backend=backend,
+                world_size=self.tp_size * self.pp_size,
+                rank=self.tp_size * self.pp_rank + self.tp_rank,
+                local_rank=self.gpu_id,
+                distributed_init_method=dist_init_method,
+                timeout=self.server_args.dist_timeout,
+            )
+            initialize_model_parallel(
+                tensor_model_parallel_size=self.tp_size,
+                pipeline_model_parallel_size=self.pp_size,
+                expert_model_parallel_size=self.moe_ep_size,
+                duplicate_tp_group=self.server_args.enable_pdmux,
+            )
+            initialize_dp_attention(
+                server_args=self.server_args,
+                model_config=self.model_config,
+            )
+
+        min_per_gpu_memory = get_available_gpu_memory(
+            self.device,
+            self.gpu_id,
+            distributed=get_world_group().world_size > 1,
+            cpu_group=get_world_group().cpu_group,
+        )
+        self.tp_group = get_tp_group()
+        self.attention_tp_group = get_attention_tp_group()
+
+        # Check memory for tensor parallelism
+        local_gpu_memory = get_available_gpu_memory(self.device, self.gpu_id)
+        if self.tp_size > 1 and not self.is_draft_worker:
+            if min_per_gpu_memory < local_gpu_memory * 0.9:
+                if get_bool_env_var("SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK"):
+                    logger.warning(
+                        "The memory capacity is unbalanced. Some GPUs may be occupied by other processes. "
+                        f"{min_per_gpu_memory=}, {local_gpu_memory=}, {local_gpu_memory * 0.9=}"
+                    )
+                else:
+                    raise ValueError(
+                        "The memory capacity is unbalanced. Some GPUs may be occupied by other processes. "
+                        f"{min_per_gpu_memory=}, {local_gpu_memory=}, {local_gpu_memory * 0.9=}"
+                    )
+
+        logger.info(
+            f"Init torch distributed ends. mem usage={(before_avail_memory - local_gpu_memory):.2f} GB"
+        )
+        return min_per_gpu_memory

@@ -2356,3 +2356,32 @@ def auto_choose_speculative_params(self: ServerArgs):
     else:
         # The default value for all other models
         return (5, 4, 8)
+
+
+@dataclasses.dataclass
+class SimArgs:
+    gpu_size: int = 1
+    tp_size: int = 1
+
+    def __post_init__(self):
+        assert self.gpu_size == self.tp_size
+
+
+@dataclasses.dataclass
+class SimBinds:
+    sim_args: SimArgs
+    tp_rank: int = 0
+    gpu_id: int = 0
+
+    @staticmethod
+    def init_new(server_args: ServerArgs, sim_args: SimArgs, tp_rank: int) -> "SimBinds":
+        tp_size_per_gpu_sim = max(server_args.tp_size // sim_args.tp_size, 1)
+        tp_rank_bind = tp_rank // tp_size_per_gpu_sim
+        gpu_id_bind = tp_rank_bind
+
+        return SimBinds(
+            sim_args=sim_args,
+            tp_rank=tp_rank_bind,
+            gpu_id=gpu_id_bind,
+        )
+

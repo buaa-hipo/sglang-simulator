@@ -20,7 +20,7 @@ from sglang.srt.distributed import (
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
-    from sglang.srt.server_args import ServerArgs
+    from sglang.srt.server_args import ServerArgs, SimBinds
 
 logger = logging.getLogger(__name__)
 
@@ -468,3 +468,64 @@ def attn_tp_all_gather_into_tensor(output: torch.Tensor, input: torch.Tensor):
 
 def attn_tp_all_gather(output_list: List[torch.Tensor], input: torch.Tensor):
     return get_attention_tp_group().all_gather(input, output_tensor_list=output_list)
+
+
+def initialize_dp_attention_sim(
+    server_args: ServerArgs,
+    model_config: ModelConfig,
+    sim_binds: SimBinds,
+):
+    global _ATTN_TP_GROUP, _ATTN_TP_RANK, _ATTN_TP_SIZE, _ATTN_DP_RANK, _ATTN_DP_SIZE
+    global _LOCAL_ATTN_DP_SIZE, _LOCAL_ATTN_DP_RANK, _ENABLE_DP_ATTENTION_FLAG
+
+    from sglang.srt.layers.sampler import SYNC_TOKEN_IDS_ACROSS_TP
+
+    enable_dp_attention = server_args.enable_dp_attention
+    tp_size = server_args.tp_size
+    dp_size = server_args.dp_size
+    moe_dense_tp_size = server_args.moe_dense_tp_size
+    pp_size = server_args.pp_size
+
+    tp_rank = get_tensor_model_parallel_rank()
+
+    _ENABLE_DP_ATTENTION_FLAG = enable_dp_attention
+
+    _ATTN_TP_RANK, _ATTN_TP_SIZE, _ATTN_DP_RANK = compute_dp_attention_world_info(
+        enable_dp_attention, tp_rank, tp_size, dp_size
+    )
+    _, _, _LOCAL_ATTN_DP_RANK = compute_dp_attention_local_info(
+        enable_dp_attention, tp_rank, tp_size, dp_size, moe_dense_tp_size
+    )
+
+    if enable_dp_attention:
+        _ATTN_DP_SIZE = dp_size
+        if moe_dense_tp_size is None:
+            _LOCAL_ATTN_DP_SIZE = _ATTN_DP_SIZE
+        else:
+            _LOCAL_ATTN_DP_SIZE = max(1, dp_size // (tp_size // moe_dense_tp_size))
+    else:
+        _ATTN_DP_SIZE = 1
+        _LOCAL_ATTN_DP_SIZE = 1
+
+    tp_group = get_tp_group()
+    _ATTN_TP_GROUP = GroupCoordinator(
+        [
+            list(range(head, head + _ATTN_TP_SIZE))
+            for head in range(0, pp_size * tp_size, _ATTN_TP_SIZE)
+        ],
+        tp_group.local_rank,
+        torch.distributed.get_backend(tp_group.device_group),
+        use_pynccl=SYNC_TOKEN_IDS_ACROSS_TP,
+        use_pymscclpp=False,
+        use_custom_allreduce=False,
+        use_hpu_communicator=False,
+        use_xpu_communicator=False,
+        use_npu_communicator=False,
+        group_name="attention_tp",
+    )
+
+    _DpGatheredBufferWrapper.set_metadata(
+        hidden_size=model_config.hidden_size,
+        dtype=model_config.dtype,
+        device=torch.device("cuda"),
+    )

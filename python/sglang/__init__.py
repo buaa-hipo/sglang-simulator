@@ -4,6 +4,7 @@
 from sglang.global_config import global_config
 from sglang.lang.api import (
     Engine,
+    EngineSim,
     Runtime,
     assistant,
     assistant_begin,
