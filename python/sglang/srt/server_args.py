@@ -2361,27 +2361,50 @@ def auto_choose_speculative_params(self: ServerArgs):
 @dataclasses.dataclass
 class SimArgs:
     gpu_size: int = 1
+    dp_size: int = 1  # 目前只支持DP 1
+    pp_size: int = 1  # 目前只支持PP 1
     tp_size: int = 1
 
     def __post_init__(self):
-        assert self.gpu_size == self.tp_size
+        assert self.gpu_size == self.dp_size * self.tp_size
 
 
 @dataclasses.dataclass
 class SimBinds:
     sim_args: SimArgs
+    dp_rank: int = 0
+    pp_rank: int = 0
     tp_rank: int = 0
     gpu_id: int = 0
 
     @staticmethod
-    def init_new(server_args: ServerArgs, sim_args: SimArgs, tp_rank: int) -> "SimBinds":
+    def init_new(
+        server_args: ServerArgs,
+        sim_args: SimArgs,
+        dp_rank: int,
+        pp_rank: int,
+        tp_rank: int,
+    ) -> "SimBinds":
         tp_size_per_gpu_sim = max(server_args.tp_size // sim_args.tp_size, 1)
+
+        pp_size_per_node = max(server_args.pp_size // server_args.pp_size, 1)
+
         tp_rank_bind = tp_rank // tp_size_per_gpu_sim
         gpu_id_bind = tp_rank_bind
 
         return SimBinds(
             sim_args=sim_args,
+            dp_rank=dp_rank,
+            pp_rank=pp_rank,
             tp_rank=tp_rank_bind,
             gpu_id=gpu_id_bind,
         )
+    
+    def get_world_size(self):
+        return self.sim_args.pp_size * self.sim_args.tp_size
+
+    def get_rank_in_group(self):
+        # 单机环境下，rank == local_rank
+        # -> torch.distributed.get_rank()
+        return self.sim_args.tp_size * self.pp_rank + self.tp_rank
 

@@ -918,12 +918,19 @@ def _launch_subprocesses_sim(
         for pp_rank in pp_rank_range:
             for tp_rank in tp_rank_range:
                 reader, writer = mp.Pipe(duplex=False)
-                gpu_id = (
-                    server_args.base_gpu_id
-                    + ((pp_rank % pp_size_per_node) * tp_size_per_node)
-                    + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
+                # gpu_id = (
+                #     server_args.base_gpu_id
+                #     + ((pp_rank % pp_size_per_node) * tp_size_per_node)
+                #     + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
+                # )
+                gpu_id = 0
+                sim_binds = SimBinds.init_new(
+                    server_args=server_args,
+                    sim_args=sim_args,
+                    dp_rank=0,
+                    pp_rank=pp_rank,
+                    tp_rank=tp_rank
                 )
-                sim_binds = SimBinds.init_new(server_args=server_args, sim_args=sim_args, tp_rank=tp_rank)
                 print(f'[LiveSim] {sim_binds=}')
 
                 moe_ep_rank = tp_rank // (server_args.tp_size // server_args.ep_size)
@@ -947,16 +954,16 @@ def _launch_subprocesses_sim(
                     proc.start()
                 scheduler_procs.append(proc)
                 scheduler_pipe_readers.append(reader)
-    else:
-        # Launch the data parallel controller
-        reader, writer = mp.Pipe(duplex=False)
-        scheduler_pipe_readers = [reader]
-        proc = mp.Process(
-            target=run_data_parallel_controller_process,
-            args=(server_args, port_args, writer),
-        )
-        proc.start()
-        scheduler_procs.append(proc)
+    # else:
+    #     # Launch the data parallel controller
+    #     reader, writer = mp.Pipe(duplex=False)
+    #     scheduler_pipe_readers = [reader]
+    #     proc = mp.Process(
+    #         target=run_data_parallel_controller_process,
+    #         args=(server_args, port_args, writer),
+    #     )
+    #     proc.start()
+    #     scheduler_procs.append(proc)
 
     if server_args.node_rank >= 1:
         # In multi-node cases, non-zero rank nodes do not need to run tokenizer or detokenizer,
@@ -1007,6 +1014,8 @@ def _launch_subprocesses_sim(
     scheduler_infos = []
     for i in range(len(scheduler_pipe_readers)):
         try:
+            # 卡在这里，rank1没有发送:
+            # [Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
             data = scheduler_pipe_readers[i].recv()
         except EOFError:
             logger.error(

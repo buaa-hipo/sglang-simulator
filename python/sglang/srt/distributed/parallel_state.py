@@ -49,6 +49,7 @@ from sglang.srt.utils import (
     is_shm_available,
     supports_custom_op,
 )
+from sglang.srt.server_args import SimBinds
 
 _is_npu = is_npu()
 
@@ -1141,6 +1142,8 @@ def init_model_parallel_group(
 
 
 _TP: Optional[GroupCoordinator] = None
+_TP_sim_inter: Optional[GroupCoordinator] = None
+_TP_sim_inner: Optional[GroupCoordinator] = None
 
 # duplicate GroupCoordinator for prefill in PD-Multiplexing
 _PDMUX_PREFILL_TP_GROUP: Optional[GroupCoordinator] = None
@@ -1654,61 +1657,9 @@ def monkey_patch_vllm_parallel_state(reverse: bool = False):
         setattr(vllm_parrlel_state, "get_world_group", get_world_group)
 
 
-def init_distributed_environment_sim(
-    world_size: int = -1,
-    rank: int = -1,
-    distributed_init_method: str = "env://",
-    local_rank: int = -1,
-    backend: str = "nccl",
-    timeout: Optional[int] = None,
-):
-    logger.debug(
-        "world_size=%d rank=%d local_rank=%d " "distributed_init_method=%s backend=%s",
-        world_size,
-        rank,
-        local_rank,
-        distributed_init_method,
-        backend,
-    )
-    if not torch.distributed.is_initialized():
-        assert distributed_init_method is not None, (
-            "distributed_init_method must be provided when initializing "
-            "distributed environment"
-        )
-        if timeout is not None:
-            assert isinstance(timeout, (int)), "timeout must be a number"
-            assert timeout > 0, "timeout must be positive"
-            timeout = timedelta(seconds=timeout)
-
-        # this backend is used for WORLD
-        torch.distributed.init_process_group(
-            backend=backend,
-            init_method=distributed_init_method,
-            world_size=world_size,
-            rank=rank,
-            timeout=timeout,
-        )
-
-    # set the local rank
-    # local_rank is not available in torch ProcessGroup,
-    # see https://github.com/pytorch/pytorch/issues/122816
-    if local_rank == -1:
-        # local rank not set, this usually happens in single-node
-        # setting, where we can use rank as local rank
-        if distributed_init_method == "env://":
-            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-        else:
-            local_rank = rank
-    global _WORLD
-    if _WORLD is None:
-        ranks = list(range(torch.distributed.get_world_size()))
-        _WORLD = init_world_group(ranks, local_rank, backend)
-    else:
-        assert (
-            _WORLD.world_size == torch.distributed.get_world_size()
-        ), "world group already initialized with a different world size"
-
-
+############################################################################
+# Live Simulation
+############################################################################
 class GroupCoordinatorSim(GroupCoordinator):
     def __init__(
         self,
@@ -1748,7 +1699,10 @@ class GroupCoordinatorSim(GroupCoordinator):
                 self.device_group = device_group
                 self.cpu_group = cpu_group
 
-        assert self.cpu_group is not None
+        #assert self.cpu_group is not None
+        # LiveSim时引入空Coordinator
+        if self.cpu_group is None:
+            return
         assert self.device_group is not None
 
         if is_cuda_alike():
@@ -1858,7 +1812,37 @@ class GroupCoordinatorSim(GroupCoordinator):
             )
 
 
+def init_model_parallel_group_sim(
+    group_ranks: List[List[int]],
+    local_rank: int,
+    backend: str,
+    use_custom_allreduce: Optional[bool] = None,
+    use_message_queue_broadcaster: bool = False,
+    group_name: Optional[str] = None,
+    use_mscclpp_allreduce: Optional[bool] = None,
+) -> GroupCoordinator:
+    if use_custom_allreduce is None:
+        use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
+    if use_mscclpp_allreduce is None:
+        use_mscclpp_allreduce = _ENABLE_MSCCLPP_ALL_REDUCE
+    return GroupCoordinatorSim(
+        group_ranks=group_ranks,
+        local_rank=local_rank,
+        torch_distributed_backend=backend,
+        #use_pynccl=not _is_npu,
+        use_pynccl=False,
+        use_pymscclpp=use_mscclpp_allreduce,
+        use_custom_allreduce=use_custom_allreduce,
+        use_hpu_communicator=True,
+        use_xpu_communicator=True,
+        use_npu_communicator=True,
+        use_message_queue_broadcaster=use_message_queue_broadcaster,
+        group_name=group_name,
+    )
+
+
 def initialize_model_parallel_sim(
+    sim_binds: SimBinds,
     tensor_model_parallel_size: int = 1,
     expert_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -1911,7 +1895,7 @@ def initialize_model_parallel_sim(
         group_ranks.append(ranks)
 
     # message queue broadcaster is only used in tensor model parallel group
-    _TP = init_model_parallel_group(
+    _TP = init_model_parallel_group_sim(
         group_ranks,
         get_world_group().local_rank,
         backend,
@@ -1919,6 +1903,56 @@ def initialize_model_parallel_sim(
             "SGLANG_USE_MESSAGE_QUEUE_BROADCASTER", "true"
         ),
         group_name="tp",
+    )
+
+    # _TP_sim_inter
+    tp_rank = torch.distributed.get_world_size() % tensor_model_parallel_size
+    tensor_model_parallel_groups_size: int = tensor_model_parallel_size // sim_binds.sim_args.tp_size
+    global _TP_sim_inter
+    assert _TP_sim_inter is None
+    group_ranks_sim_inter = []
+    for i in range(num_tensor_model_parallel_groups):
+        ranks = list(
+            range(i * tensor_model_parallel_size, (i + 1) * tensor_model_parallel_size, tensor_model_parallel_groups_size)
+        )
+        group_ranks_sim_inter.append(ranks)
+    print(f'[LiveSim] {tp_rank=} {group_ranks_sim_inter=}')
+
+    #if tp_rank == sim_binds.tp_rank:
+    _TP_sim_inter = init_model_parallel_group_sim(
+        group_ranks_sim_inter,
+        get_world_group().local_rank,
+        backend,
+        use_message_queue_broadcaster=get_bool_env_var(
+            "SGLANG_USE_MESSAGE_QUEUE_BROADCASTER", "true"
+        ),
+        group_name="tp_sim_inter",
+    )
+    # 空_TP时补充必要信息
+    # if not hasattr(_TP, 'rank_in_group') or _TP.rank_in_group is None:
+    #     _TP.rank_in_group = torch.distributed.get_rank() % tensor_model_parallel_size
+    #     _TP.world_size = tensor_model_parallel_size
+    #     print(f'_TP None : local_rank={get_world_group().local_rank}')
+    
+    # _TP_sim_inner
+    tp_sim_group_size: int = tensor_model_parallel_size // sim_binds.sim_args.tp_size
+    group_ranks_sim_inner = []
+    for i in range(sim_binds.sim_args.tp_size):
+        ranks = list(
+            range(i * tp_sim_group_size, (i + 1) * tp_sim_group_size)
+        )
+        group_ranks_sim_inner.append(ranks)
+    print(f'[LiveSim] {tp_rank=} {group_ranks_sim_inner=}')
+    global _TP_sim_inner
+    assert _TP_sim_inner is None
+    _TP_sim_inner = init_model_parallel_group_sim(
+        group_ranks_sim_inner,
+        tp_rank % tp_sim_group_size,
+        backend,
+        use_message_queue_broadcaster=get_bool_env_var(
+            "SGLANG_USE_MESSAGE_QUEUE_BROADCASTER", "true"
+        ),
+        group_name="tp_sim",
     )
 
     if duplicate_tp_group:
@@ -1969,7 +2003,7 @@ def initialize_model_parallel_sim(
             ranks = list(range(st, en))
             group_ranks.append(ranks)
 
-    _MOE_TP = init_model_parallel_group(
+    _MOE_TP = init_model_parallel_group_sim(
         group_ranks,
         get_world_group().local_rank,
         backend,

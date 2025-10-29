@@ -3083,6 +3083,7 @@ def run_scheduler_process_sim(
                 "max_req_input_len": scheduler.max_req_input_len,
             }
         )
+        print(f'Send done for {tp_rank=}')
 
         disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
         if disaggregation_mode == DisaggregationMode.NULL:

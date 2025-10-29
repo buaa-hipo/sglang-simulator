@@ -473,6 +473,7 @@ def attn_tp_all_gather(output_list: List[torch.Tensor], input: torch.Tensor):
 def initialize_dp_attention_sim(
     server_args: ServerArgs,
     model_config: ModelConfig,
+    tp_rank: int,
     sim_binds: SimBinds,
 ):
     global _ATTN_TP_GROUP, _ATTN_TP_RANK, _ATTN_TP_SIZE, _ATTN_DP_RANK, _ATTN_DP_SIZE

@@ -35,8 +35,8 @@ from sglang.srt.distributed import (
     get_tp_group,
     get_world_group,
     init_distributed_environment,
-    init_distributed_environment_sim,
     initialize_model_parallel,
+    initialize_model_parallel_sim,
     set_custom_all_reduce,
     set_mscclpp_all_reduce,
 )
@@ -1952,6 +1952,7 @@ class ModelRunnerSim(ModelRunner):
         self.use_mla_backend = self.model_config.attention_arch == AttentionArch.MLA
         self.attention_chunk_size = model_config.attention_chunk_size
         self.forward_pass_id = 0
+        self.sim_binds = sim_binds
 
         # Apply the rank zero filter to logger
         if not any(isinstance(f, RankZeroFilter) for f in logger.filters):
@@ -2046,24 +2047,30 @@ class ModelRunnerSim(ModelRunner):
                         "init_cpu_threads_env and shared memory based AllReduce is disabled since intel amx backend is not available"
                     )
 
-            # Only initialize the distributed environment on the target model worker.
-            init_distributed_environment_sim(
-                backend=backend,
+            init_distributed_environment(
+                #backend=backend,
+                backend='gloo',
                 world_size=self.tp_size * self.pp_size,
                 rank=self.tp_size * self.pp_rank + self.tp_rank,
                 local_rank=self.gpu_id,
                 distributed_init_method=dist_init_method,
                 timeout=self.server_args.dist_timeout,
             )
-            initialize_model_parallel(
+            print(f'init_distributed_environment done for {self.tp_rank=}')
+            # 虚拟初始化所有进程
+            initialize_model_parallel_sim(
                 tensor_model_parallel_size=self.tp_size,
                 pipeline_model_parallel_size=self.pp_size,
                 expert_model_parallel_size=self.moe_ep_size,
                 duplicate_tp_group=self.server_args.enable_pdmux,
+                sim_binds=self.sim_binds,
+                backend='gloo',
             )
-            initialize_dp_attention(
+            initialize_dp_attention_sim(
                 server_args=self.server_args,
                 model_config=self.model_config,
+                tp_rank=self.tp_rank,
+                sim_binds=self.sim_binds,
             )
 
         min_per_gpu_memory = get_available_gpu_memory(

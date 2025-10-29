@@ -206,6 +206,8 @@ class Qwen3DecoderLayer(nn.Module):
             is_layer_sparse=False,
             is_previous_layer_sparse=False,
         )
+        print(f'[LiveSim] {self.layer_scatter_modes=}')
+
         self.layer_communicator = LayerCommunicator(
             layer_scatter_modes=self.layer_scatter_modes,
             input_layernorm=self.input_layernorm,
