@@ -252,3 +252,8 @@ outputs/
 
 # Eval Cache
 .longbench_cache/
+
+# Ascend NPUs
+kernel_meta
+fusion_result.json
+*_ascend_pt
