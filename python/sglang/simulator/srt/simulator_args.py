@@ -6,6 +6,11 @@ from typing import List
 @dataclasses.dataclass
 class SimulatorArgs:
     gpu_size_actual: int
+    base_gpu_id_actual: int = 0
+    gpu_id_step_actual: int = 1
+
+    # Profiler
+    sleep_on_idle: bool = False
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -18,14 +23,21 @@ class SimulatorArgs:
         parser.add_argument(
             "--base-gpu-id-actual",
             type=int,
-            default=0,
+            default=SimulatorArgs.base_gpu_id_actual,
             help="The base GPU ID to start allocating GPUs from. Useful when running multiple instances on the same machine.",
         )
         parser.add_argument(
             "--gpu-id-step-actual",
             type=int,
-            default=1,
+            default=SimulatorArgs.gpu_id_step_actual,
             help="The delta between consecutive GPU IDs that are used. For example, setting it to 2 will use GPU 0,2,4,...",
+        )
+
+        # Profiler
+        parser.add_argument(
+            "--sleep-on-idle",
+            action="store_true",
+            help="Reduce CPU usage when sglang is idle.",
         )
 
     @classmethod

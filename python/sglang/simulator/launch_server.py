@@ -28,7 +28,7 @@ def run_server(server_args):
 if __name__ == "__main__":
     simulator_args, remaining_argv = prepare_simulator_args(sys.argv[1:])
     server_args = prepare_server_args(remaining_argv)
-    init_simulation_controller()
+    init_simulation_controller(server_args, simulator_args)
 
     try:
         run_server(server_args)

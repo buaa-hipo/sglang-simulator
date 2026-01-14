@@ -24,6 +24,7 @@ from sglang.srt.entrypoints.engine import (
     _init_tokenizer_manager,
 )
 from sglang.simulator.managers.controller import get_simulation_controller
+from sglang.simulator.profiler.profiler import Profiler
 
 
 def _launch_subprocesses(
@@ -32,6 +33,9 @@ def _launch_subprocesses(
     """
     Launch the TokenizerManager in the main process, the Scheduler in a subprocess, and the DetokenizerManager in another subprocess.
     """
+    # *Simualtion Profiler
+    start_time = Profiler.profile_time_host()
+
     # Configure global environment
     configure_logger(server_args)
     _set_envs_and_config(server_args)
@@ -185,5 +189,12 @@ def _launch_subprocesses(
     # Assume all schedulers have the same scheduler_info
     scheduler_info = scheduler_infos[0]
     tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
+
+    # *Simualtion Profiler
+    print(f'Controller sending perf...')
+    duration = Profiler.profile_time_host(start_time)
+    simulator_controller.send_perf(
+        {"_launch_subprocesses": duration}
+    )
 
     return tokenizer_manager, template_manager, scheduler_info, port_args
