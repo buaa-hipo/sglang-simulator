@@ -90,8 +90,7 @@ def _launch_subprocesses(
                 # TODO: TP和GPU映射
                 tp_rank_mapped = simulator_controller.tp_mapping(tp_rank)
                 gpu_id_mapped = simulator_controller.gpu_id_mapping(tp_rank_mapped)
-
-                with maybe_reindex_device_id(gpu_id) as gpu_id:
+                with maybe_reindex_device_id(gpu_id_mapped) as gpu_id:
                     proc = mp.Process(
                         target=run_scheduler_process,   # *Simulation
                         args=(

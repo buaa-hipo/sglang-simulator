@@ -68,12 +68,17 @@ from sglang.srt.distributed import (
     get_pp_group,
     get_tp_group,
     get_world_group,
-    init_distributed_environment,
-    initialize_model_parallel,
+    # init_distributed_environment,
+    # initialize_model_parallel,
     set_custom_all_reduce,
     set_mscclpp_all_reduce,
     set_torch_symm_mem_all_reduce,
 )
+from sglang.simulator.srt.distributed import (
+    init_distributed_environment,
+    initialize_model_parallel,
+)
+
 from sglang.srt.layers.dp_attention import (
     DpPaddingMode,
     get_attention_tp_group,
@@ -283,7 +288,7 @@ class ModelRunnerSimulator(ModelRunner):
             # *Simulation
             # TODO: 修改torch分布式初始化，问题是多个rank不能在同一张卡上初始化成功
             init_distributed_environment(
-                backend=backend,
+                backend="gloo",
                 world_size=self.tp_size * self.pp_size,
                 rank=self.tp_size * self.pp_rank + self.tp_rank,
                 local_rank=self.gpu_id,
