@@ -25,14 +25,24 @@ class NpuCommunicator:
             # Convert negative dim to positive.
             dim += x.dim()
         input_size = x.size()
-        output_size = (input_size[0] * world_size,) + input_size[1:]
-        # Allocate output tensor.
-        output_tensor = torch.empty(output_size, dtype=x.dtype, device=x.device)
-        # All-gather.
-        dist.all_gather_into_tensor(output_tensor, x, group=self.group)
+        # output_size = (input_size[0] * world_size,) + input_size[1:]
+        # # Allocate output tensor.
+        # output_tensor = torch.empty(output_size, dtype=x.dtype, device=x.device)
+        # # All-gather.
+        # dist.all_gather_into_tensor(output_tensor, x, group=self.group)
         # Reshape
-        output_tensor = output_tensor.reshape((world_size,) + input_size)
-        output_tensor = output_tensor.movedim(0, dim)
+        # output_tensor = output_tensor.reshape((world_size,) + input_size)
+        # output_tensor = output_tensor.movedim(0, dim)
+        # output_tensor = output_tensor.reshape(
+        #     input_size[:dim] + (world_size * input_size[dim],) + input_size[dim + 1 :]
+        # )
+        
+        tensor_list = [
+            torch.empty_like(x) for _ in range(world_size)
+        ]
+        dist.all_gather(tensor_list, x, group=self.group)
+        stacked_tensor = torch.stack(tensor_list, dim=0)
+        output_tensor = stacked_tensor.movedim(0, dim)
         output_tensor = output_tensor.reshape(
             input_size[:dim] + (world_size * input_size[dim],) + input_size[dim + 1 :]
         )

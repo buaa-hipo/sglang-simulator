@@ -640,7 +640,9 @@ class ModelRunner:
         elif self.device == "cpu":
             backend = "gloo"
         elif self.device == "npu":
-            backend = "hccl"
+            # backend = "hccl" 
+            # hccl doesn't support all reduce 
+            backend = "lccl"
 
         before_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
         if not self.server_args.enable_p2p_check:
