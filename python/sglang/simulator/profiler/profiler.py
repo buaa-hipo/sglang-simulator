@@ -78,8 +78,8 @@ class Profiler:
                 else:
                     self.maybe_sleep_on_idle()
         finally:
-            if hasattr(profiler, "_fp") and profiler._fp:
-                profiler._fp.close()
+            if self._fp and not self._fp.closed:
+            self._fp.close()
 
     def maybe_sleep_on_idle(self):
         if self.idle_sleeper is not None:
@@ -92,7 +92,7 @@ class Profiler:
         duration = time.perf_counter() - timer  # seconds
         return duration
 
-PROFILER_DIR = os.getenv("GLANG_TORCH_PROFILER_DIR", "/tmp")
+PROFILER_DIR = os.getenv("SGLANG_TORCH_PROFILER_DIR", "/tmp")
 
 def run_profiler(
     controller_push_ipc_name: str,
@@ -112,7 +112,7 @@ def run_profiler(
         output_dir,
         "profile_profiler.jsonl"
     )
-    print(f"Dump profiling traces to {output_dir}")
+    print(f"Dump profiling data to {output_dir}")
 
     # Config the process
     setproctitle.setproctitle("sglang::simulator::profiler")
