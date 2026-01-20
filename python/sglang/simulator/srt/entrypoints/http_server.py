@@ -17,11 +17,13 @@ from sglang.srt.entrypoints.http_server import (
     app,
     _global_state,
 )
+from sglang.simulator.srt.simulator_args import SimulatorArgs
 from sglang.simulator.srt.entrypoints.engine import _launch_subprocesses
 
 
 def launch_server(
     server_args: ServerArgs,
+    simulator_args: SimulatorArgs,
     pipe_finish_writer: Optional[multiprocessing.connection.Connection] = None,
     launch_callback: Optional[Callable[[], None]] = None,
 ):
@@ -41,7 +43,7 @@ def launch_server(
     2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
     """
     tokenizer_manager, template_manager, scheduler_info, port_args = (
-        _launch_subprocesses(server_args=server_args)
+        _launch_subprocesses(server_args=server_args, simulator_args=simulator_args)
     )
 
     set_global_state(

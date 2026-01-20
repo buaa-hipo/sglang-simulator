@@ -32,7 +32,6 @@ from sglang.srt.entrypoints.engine import (
 from sglang.simulator.managers.controller import get_simulation_controller
 from sglang.simulator.profiler.profiler import Profiler
 from sglang.simulator.srt.simulator_args import SimulatorArgs
-from sglang.simulator.managers.controller import init_simulation_controller
 
 
 class EngineSimulator(Engine):
@@ -46,7 +45,7 @@ class EngineSimulator(Engine):
         if "simulator_args" not in kwargs:
             raise ValueError("simulator_args must be provided!")
         _simulator_args = kwargs.pop("simulator_args")
-        simulator_args = SimulatorArgs(**_simulator_args)
+        self.simulator_args = SimulatorArgs(**_simulator_args)
 
         # Parse server_args
         if "server_args" in kwargs:
@@ -61,15 +60,12 @@ class EngineSimulator(Engine):
         self.server_args = server_args
         logger.info(f"{server_args=}")
 
-        # *Simulation
-        init_simulation_controller(server_args, simulator_args)
-
         # Shutdown the subprocesses automatically when the program exits
         atexit.register(self.shutdown)
 
         # Launch subprocesses
         tokenizer_manager, template_manager, scheduler_info, port_args = (
-            _launch_subprocesses(server_args=server_args)
+            _launch_subprocesses(server_args=server_args, simulator_args=self.simulator_args)
         )
         self.tokenizer_manager = tokenizer_manager
         self.template_manager = template_manager
@@ -103,7 +99,9 @@ class EngineSimulator(Engine):
 
 
 def _launch_subprocesses(
-    server_args: ServerArgs, port_args: Optional[PortArgs] = None
+    server_args: ServerArgs,
+    simulator_args: SimulatorArgs,
+    port_args: Optional[PortArgs] = None,
 ) -> Tuple[TokenizerManager, TemplateManager, Dict, PortArgs]:
     """
     Launch the TokenizerManager in the main process, the Scheduler in a subprocess, and the DetokenizerManager in another subprocess.
@@ -172,6 +170,7 @@ def _launch_subprocesses(
                         args=(
                             server_args,
                             port_args,
+                            simulator_args,
                             gpu_id,
                             tp_rank,
                             moe_ep_rank,

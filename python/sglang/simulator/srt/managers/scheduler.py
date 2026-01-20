@@ -105,6 +105,8 @@ from sglang.srt.managers.scheduler import (
     Scheduler,
     logger,
 )
+from sglang.simulator.srt.simulator_args import SimulatorArgs
+from sglang.simulator.managers.controller import init_simulation_controller
 
 
 class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
@@ -483,6 +485,7 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
 def run_scheduler_process(
     server_args: ServerArgs,
     port_args: PortArgs,
+    simulator_args: SimulatorArgs,
     gpu_id: int,
     tp_rank: int,
     moe_ep_rank: int,
@@ -490,6 +493,9 @@ def run_scheduler_process(
     dp_rank: Optional[int],
     pipe_writer,
 ):
+    # *Simulation
+    init_simulation_controller(server_args, simulator_args)
+
     # Generate the logger prefix
     prefix = ""
     if dp_rank is None and "SGLANG_DP_RANK" in os.environ:
