@@ -2,8 +2,8 @@ import tempfile
 import multiprocessing as mp
 import zmq
 from typing import Any
-from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import get_zmq_socket
+from sglang.simulator.srt.server_args import ServerArgs
+from sglang.simulator.srt.utils import get_zmq_socket
 from sglang.simulator.srt.simulator_args import SimulatorArgs
 from sglang.simulator.managers.parallel_mapping import (
     TP_mapping,

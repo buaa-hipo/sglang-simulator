@@ -4,8 +4,8 @@ import asyncio
 import os
 import sys
 
-from sglang.srt.server_args import prepare_server_args
-from sglang.srt.utils import kill_process_tree
+from sglang.simulator.srt.server_args import prepare_server_args
+from sglang.simulator.srt.utils import kill_process_tree
 from sglang.simulator.srt.simulator_args import prepare_simulator_args
 from sglang.simulator.managers.controller import init_simulation_controller
 
@@ -14,7 +14,7 @@ def run_server(server_args):
     """Run the server based on server_args.grpc_mode."""
     if server_args.grpc_mode:
         raise Exception("grpc_mode is not implemented!")
-        # from sglang.srt.entrypoints.grpc_server import serve_grpc
+        # from sglang.simulator.srt.entrypoints.grpc_server import serve_grpc
 
         # asyncio.run(serve_grpc(server_args))
     else:

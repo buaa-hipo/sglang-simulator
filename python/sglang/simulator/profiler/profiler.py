@@ -6,8 +6,8 @@ import signal
 import zmq
 import time
 from sglang.utils import get_exception_traceback
-from sglang.srt.managers.scheduler import IdleSleeper
-from sglang.srt.utils import (
+from sglang.simulator.srt.managers.scheduler import IdleSleeper
+from sglang.simulator.srt.utils import (
     get_zmq_socket,
     kill_itself_when_parent_died,
 )

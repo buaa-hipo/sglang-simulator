@@ -1,4 +1,4 @@
-from sglang.srt.server_args import ServerArgs
+from sglang.simulator.srt.server_args import ServerArgs
 from sglang.simulator.srt.simulator_args import SimulatorArgs
 
 

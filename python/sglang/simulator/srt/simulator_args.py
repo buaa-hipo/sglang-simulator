@@ -48,7 +48,7 @@ class SimulatorArgs:
 
 def prepare_simulator_args(argv: List[str]) -> SimulatorArgs:
     # Import here to avoid circular imports
-    from sglang.srt.server_args_config_parser import ConfigArgumentMerger
+    from sglang.simulator.srt.server_args_config_parser import ConfigArgumentMerger
 
     parser = argparse.ArgumentParser()
     SimulatorArgs.add_cli_args(parser)

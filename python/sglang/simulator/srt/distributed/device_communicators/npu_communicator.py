@@ -2,10 +2,10 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
-from sglang.srt.utils import is_npu
+from sglang.simulator.srt.utils import is_npu
 
 
-class NpuCommunicatorSim:
+class NpuCommunicator:
 
     def __init__(self, group: ProcessGroup):
         if not is_npu():
@@ -16,9 +16,7 @@ class NpuCommunicatorSim:
         self.world_size = dist.get_world_size(self.group)
 
     def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
-        # dist.all_reduce(x, group=self.group)
-        # TODO: change the all reduce based on hccl
-
+        dist.all_reduce(x, group=self.group)
         return x
 
     def all_gather(self, x: torch.Tensor, dim: int = -1) -> torch.Tensor:
@@ -31,9 +29,7 @@ class NpuCommunicatorSim:
         # Allocate output tensor.
         output_tensor = torch.empty(output_size, dtype=x.dtype, device=x.device)
         # All-gather.
-        # dist.all_gather_into_tensor(output_tensor, x, group=self.group)
-        # TODO : change all gather based on hccl
-
+        dist.all_gather_into_tensor(output_tensor, x, group=self.group)
         # Reshape
         output_tensor = output_tensor.reshape((world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
