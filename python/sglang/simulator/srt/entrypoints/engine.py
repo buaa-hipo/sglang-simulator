@@ -32,6 +32,7 @@ from sglang.srt.entrypoints.engine import (
 from sglang.simulator.managers.controller import get_simulation_controller
 from sglang.simulator.profiler.profiler import Profiler
 from sglang.simulator.srt.simulator_args import SimulatorArgs
+from sglang.simulator.managers.controller import init_simulation_controller
 
 
 class EngineSimulator(Engine):
@@ -125,6 +126,7 @@ def _launch_subprocesses(
     )
 
     # *Simulation
+    init_simulation_controller(server_args, simulator_args)
     simulator_controller = get_simulation_controller()
 
     scheduler_procs = []

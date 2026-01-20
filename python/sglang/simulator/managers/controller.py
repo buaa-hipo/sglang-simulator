@@ -104,7 +104,8 @@ def init_simulation_controller(
     simulator_args: SimulatorArgs,
 ):
     global _CONTROLLER
-    _CONTROLLER = Controller(
-        server_args,
-        simulator_args,
-    )
+    if _CONTROLLER is None:
+        _CONTROLLER = Controller(
+            server_args,
+            simulator_args,
+        )
