@@ -38,7 +38,7 @@ import torch
 import triton
 import triton.language as tl
 
-from sglang.srt.distributed.parallel_state import (
+from sglang.srt.distributed import (
     get_moe_expert_parallel_world_size,
     get_tensor_model_parallel_world_size,
 )
