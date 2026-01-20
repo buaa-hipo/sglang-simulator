@@ -31,6 +31,8 @@ from sglang.srt.entrypoints.engine import (
 )
 from sglang.simulator.managers.controller import get_simulation_controller
 from sglang.simulator.profiler.profiler import Profiler
+from sglang.simulator.srt.simulator_args import SimulatorArgs
+from sglang.simulator.managers.controller import init_simulation_controller
 
 
 class EngineSimulator(Engine):
@@ -39,6 +41,13 @@ class EngineSimulator(Engine):
         The arguments of this function is the same as `sglang/srt/server_args.py::ServerArgs`.
         Please refer to `ServerArgs` for the documentation.
         """
+
+        # Prepare simulator args
+        print(f'{kwargs=}')
+        if "simulator_args" not in kwargs:
+            raise ValueError("simulator_args must be provided!")
+        _simulator_args = kwargs.pop("simulator_args")
+        simulator_args = SimulatorArgs(**_simulator_args)
 
         # Parse server_args
         if "server_args" in kwargs:
@@ -52,6 +61,9 @@ class EngineSimulator(Engine):
             server_args = ServerArgs(**kwargs)
         self.server_args = server_args
         logger.info(f"{server_args=}")
+
+        # *Simulation
+        init_simulation_controller(server_args, simulator_args)
 
         # Shutdown the subprocesses automatically when the program exits
         atexit.register(self.shutdown)

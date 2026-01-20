@@ -1,12 +1,19 @@
-import sglang
+from sglang.simulator.srt.entrypoints.engine import EngineSimulator
 
 
 def main():
-    llm = sglang.simulator.srt.entrypoints.engine.EngineSimulator(
-        model_path="/data/llama-3-8b-instruct/",
+    simulator_args = {
+        "gpu_size_actual": 1,
+    }
+
+    llm = EngineSimulator(
+        model_path="/mnt/data/llm_models/Qwen3-4B-Instruct-2507/",
         tp_size=2,
         base_gpu_id=0,
         disable_cuda_graph=True,
+
+        # simulation
+        simulator_args=simulator_args,
     )
 
     prompts = [

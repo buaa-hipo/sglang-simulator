@@ -1,6 +1,6 @@
 import dataclasses
 import argparse
-from typing import List
+from typing import List, Tuple
 
 
 @dataclasses.dataclass
@@ -46,10 +46,7 @@ class SimulatorArgs:
         return cls(**{attr: getattr(args, attr) for attr in attrs})
 
 
-def prepare_simulator_args(argv: List[str]) -> SimulatorArgs:
-    # Import here to avoid circular imports
-    from sglang.srt.server_args_config_parser import ConfigArgumentMerger
-
+def prepare_simulator_args(argv: List[str]) -> Tuple[SimulatorArgs, List[str]]:
     parser = argparse.ArgumentParser()
     SimulatorArgs.add_cli_args(parser)
     raw_args, remaining_argv = parser.parse_known_args(argv)
