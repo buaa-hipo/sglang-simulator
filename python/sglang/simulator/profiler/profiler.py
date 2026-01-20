@@ -79,7 +79,7 @@ class Profiler:
                     self.maybe_sleep_on_idle()
         finally:
             if hasattr(profiler, "_fp") and profiler._fp:
-            profiler._fp.close()
+                profiler._fp.close()
 
     def maybe_sleep_on_idle(self):
         if self.idle_sleeper is not None:
