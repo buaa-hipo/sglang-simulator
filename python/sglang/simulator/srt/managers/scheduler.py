@@ -491,6 +491,7 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
             self.process_input_requests(recv_reqs)
 
             recv_t = time.perf_counter()
+            print("Scheduler received requests.")
 
             if self._engine_paused:
                 continue
@@ -505,14 +506,19 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
                 "latency": duration_recv
             })  # 调度耗时
 
+            print(f'Scheduler processing batch of size {0 if batch is None else len(batch.reqs)}')
+
             if batch:
                 result = self.run_batch(batch)
                 self.process_batch_result(batch, result)
+
+                print('Scheduler finished processing batch.')
+
                 result_t = time.perf_counter()
                 simulator_controller.send_perf({
                     "event": "Operator_distribution_processing",
                     "latency": result_t - batch_t
-                })   # 算子下发
+                })   # 算子下发/处理
 
             else:
                 # When the server is idle, do self-check and re-init some states

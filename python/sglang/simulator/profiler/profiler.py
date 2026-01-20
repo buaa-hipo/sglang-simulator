@@ -64,7 +64,6 @@ class Profiler:
     def write_perf(self, perf: dict):
         if self._fp is None:
             return
-
         record = {**perf}
         self._fp.write(json.dumps(record) + "\n")    
 
@@ -74,6 +73,7 @@ class Profiler:
                 perf = self.recv_perf()
                 if perf is not None:
                     logger.info(f"Profiler received perf: {str(perf)}")
+                    print("starting write perf")
                     self.write_perf(perf)
                 else:
                     self.maybe_sleep_on_idle()
