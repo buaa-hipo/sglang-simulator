@@ -106,6 +106,8 @@ from sglang.srt.managers.scheduler import (
     logger,
 )
 
+from sglang.simulator.managers.controller import get_simulator_controller
+
 
 class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
     def __init__(
@@ -478,6 +480,48 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
                 (ContinueGenerationReqInput, self.continue_generation),
             ]
         )
+
+    def event_loop_normal(self):
+        """A normal scheduler loop."""
+
+        simulator_controller = get_simulator_controller()
+
+        while True:
+            recv_reqs = self.recv_requests()
+            self.process_input_requests(recv_reqs)
+
+            recv_t = time.perf_counter()
+
+            if self._engine_paused:
+                continue
+
+            batch = self.get_next_batch_to_run()
+            self.cur_batch = batch
+
+            batch_t = time.perf_counter()
+            duration_recv = batch_t - recv_t
+            simulator_controller.send_perf({
+                "event": "host_scheduler_latency",
+                "latency": duration_recv
+            })  # 调度耗时
+
+            if batch:
+                result = self.run_batch(batch)
+                self.process_batch_result(batch, result)
+                result_t = time.perf_counter()
+                simulator_controller.send_perf({
+                    "event": "Operator_distribution_processing",
+                    "latency": result_t - batch_t
+                })   # 算子下发
+
+            else:
+                # When the server is idle, do self-check and re-init some states
+                self.self_check_during_idle()
+
+            self.last_batch = batch
+
+            if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
+                self.self_check_during_busy()
 
 
 def run_scheduler_process(
