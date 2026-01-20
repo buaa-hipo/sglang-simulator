@@ -69,13 +69,17 @@ class Profiler:
         self._fp.write(json.dumps(record) + "\n")    
 
     def event_loop_normal(self):
-        while True:
-            perf = self.recv_perf()
-            if perf is not None:
-                logger.info(f"Profiler received perf: {str(perf)}")
-                self.write_perf(perf)
-            else:
-                self.maybe_sleep_on_idle()
+        try:
+            while True:
+                perf = self.recv_perf()
+                if perf is not None:
+                    logger.info(f"Profiler received perf: {str(perf)}")
+                    self.write_perf(perf)
+                else:
+                    self.maybe_sleep_on_idle()
+        finally:
+            if hasattr(profiler, "_fp") and profiler._fp:
+                profiler._fp.close()
 
     def maybe_sleep_on_idle(self):
         if self.idle_sleeper is not None:
@@ -122,8 +126,6 @@ def run_profiler(
             controller_pull_ipc_name,
             output_file=output_file,
         )
-        if profiler._fp:
-            profiler._fp.close()
         profiler.event_loop_normal()
 
     except Exception:
@@ -131,7 +133,7 @@ def run_profiler(
         logger.error(f"Profiler hit an exception: {traceback}")
         parent_process.send_signal(signal.SIGQUIT)
     
-    finally:
-        if hasattr(profiler, "_fp") and profiler._fp:
-            profiler._fp.close()
+    # finally:
+        # if hasattr(profiler, "_fp") and profiler._fp:
+            # profiler._fp.close()
 
