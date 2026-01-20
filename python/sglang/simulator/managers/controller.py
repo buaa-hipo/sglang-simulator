@@ -87,6 +87,9 @@ class Controller:
             tp_rank_mapped,
         )
 
+    def get_ccl_backend(self) -> str:
+        return self.simulator_args.ccl_backend
+
 
 _CONTROLLER: Controller = None
 

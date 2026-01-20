@@ -109,6 +109,7 @@ from sglang.srt.model_executor.model_runner import (
     _is_npu,
     SGLANG_CI_SMALL_KV_SIZE,
 )
+from sglang.simulator.managers.controller import get_simulation_controller
 
 
 class ModelRunnerSimulator(ModelRunner):
@@ -282,8 +283,9 @@ class ModelRunnerSimulator(ModelRunner):
             # Only initialize the distributed environment on the target model worker.
             # *Simulation
             # TODO: 修改torch分布式初始化，问题是多个rank不能在同一张卡上初始化成功
+            simulator_controller = get_simulation_controller()
             init_distributed_environment(
-                backend=backend,
+                backend=simulator_controller.get_ccl_backend(),
                 world_size=self.tp_size * self.pp_size,
                 rank=self.tp_size * self.pp_rank + self.tp_rank,
                 local_rank=self.gpu_id,

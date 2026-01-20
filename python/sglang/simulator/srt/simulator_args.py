@@ -8,6 +8,7 @@ class SimulatorArgs:
     gpu_size_actual: int
     base_gpu_id_actual: int = 0
     gpu_id_step_actual: int = 1
+    ccl_backend: str = "hccl"
 
     # Profiler
     sleep_on_idle: bool = False
@@ -31,6 +32,12 @@ class SimulatorArgs:
             type=int,
             default=SimulatorArgs.gpu_id_step_actual,
             help="The delta between consecutive GPU IDs that are used. For example, setting it to 2 will use GPU 0,2,4,...",
+        )
+        parser.add_argument(
+            "--ccl-backend",
+            type=str,
+            default=SimulatorArgs.ccl_backend,
+            help="The backend to use for CCL communication. Options are 'hccl', 'lccl', etc.",
         )
 
         # Profiler
