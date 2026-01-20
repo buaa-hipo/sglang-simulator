@@ -92,7 +92,7 @@ class Profiler:
         duration = time.perf_counter() - timer  # seconds
         return duration
 
-PROFILER_DIR = os.getenv("PROFILER_DIR", "/tmp")
+PROFILER_DIR = os.getenv("GLANG_TORCH_PROFILER_DIR", "/tmp")
 
 def run_profiler(
     controller_push_ipc_name: str,
@@ -102,16 +102,17 @@ def run_profiler(
 
     if output_dir is None:
         output_dir = PROFILER_DIR
-    output_dir = Path(os.path.abspath(os.path.normpath(output_dir))) / str(int(time.time()))
+    # output_dir = Path(os.path.abspath(os.path.normpath(output_dir))) / str(int(time.time()))
     # output_dir = Path(PROFILER_DIR).resolve() / f"simulator_profile{int(time.time())}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    #output_file = output_dir / f"profile_profiler.jsonl"
-    #output_dir = os.path.abspath(os.path.normpath(output_dir))
+    # output_file = output_dir / f"profile_profiler.jsonl"
+    # output_dir = os.path.abspath(os.path.normpath(output_dir))
     output_file = os.path.join(
         output_dir,
-        f"profile_profiler.jsonl"
+        "profile_profiler.jsonl"
     )
+    print(f"Dump profiling traces to {output_dir}")
 
     # Config the process
     setproctitle.setproctitle("sglang::simulator::profiler")
