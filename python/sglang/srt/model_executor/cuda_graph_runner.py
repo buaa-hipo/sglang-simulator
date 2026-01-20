@@ -35,7 +35,7 @@ from sglang.srt.distributed import get_tensor_model_parallel_rank
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     set_graph_pool_id,
 )
-from sglang.srt.distributed.parallel_state import (
+from sglang.srt.distributed import (
     GroupCoordinator,
     graph_capture,
     set_pdmux_status,

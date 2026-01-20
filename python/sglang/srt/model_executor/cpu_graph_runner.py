@@ -26,7 +26,7 @@ import torch
 import tqdm
 
 from sglang.srt.distributed import get_tensor_model_parallel_rank
-from sglang.srt.distributed.parallel_state import GroupCoordinator
+from sglang.srt.distributed import GroupCoordinator
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.model_executor.forward_batch_info import (
     CaptureHiddenMode,

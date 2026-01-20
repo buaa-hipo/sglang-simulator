@@ -12,7 +12,7 @@ import torch
 from mindspore._c_expression import GroupOptions
 from mindspore.communication import create_group
 
-from sglang.srt.distributed.parallel_state import _groups
+from sglang.srt.distributed import _groups
 
 
 class _Tmp:

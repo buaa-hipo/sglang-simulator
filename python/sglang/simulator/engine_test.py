@@ -4,6 +4,7 @@ from sglang.simulator.srt.entrypoints.engine import EngineSimulator
 def main():
     simulator_args = {
         "gpu_size_actual": 1,
+        "ccl_backend": "lccl",
     }
 
     llm = EngineSimulator(
@@ -11,6 +12,7 @@ def main():
         tp_size=2,
         base_gpu_id=0,
         disable_cuda_graph=True,
+        mem_fraction_static=0.35,
 
         # simulation
         simulator_args=simulator_args,
