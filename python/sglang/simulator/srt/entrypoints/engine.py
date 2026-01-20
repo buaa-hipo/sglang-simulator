@@ -43,7 +43,6 @@ class EngineSimulator(Engine):
         """
 
         # Prepare simulator args
-        print(f'{kwargs=}')
         if "simulator_args" not in kwargs:
             raise ValueError("simulator_args must be provided!")
         _simulator_args = kwargs.pop("simulator_args")

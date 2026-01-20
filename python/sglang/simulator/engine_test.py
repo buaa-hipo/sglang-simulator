@@ -7,7 +7,7 @@ def main():
     }
 
     llm = EngineSimulator(
-        model_path="/mnt/data/llm_models/Qwen3-4B-Instruct-2507/",
+        model_path="/data/llama-3-8b-instruct/",
         tp_size=2,
         base_gpu_id=0,
         disable_cuda_graph=True,
