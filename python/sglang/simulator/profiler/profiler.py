@@ -104,7 +104,8 @@ def run_profiler(
         output_dir = PROFILER_DIR
     # output_dir = Path(os.path.abspath(os.path.normpath(output_dir))) / str(int(time.time()))
     # output_dir = Path(PROFILER_DIR).resolve() / f"simulator_profile{int(time.time())}"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # output_dir.mkdir(parents=True, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
 
     # output_file = output_dir / f"profile_profiler.jsonl"
     # output_dir = os.path.abspath(os.path.normpath(output_dir))
