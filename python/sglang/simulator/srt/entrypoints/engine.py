@@ -1,5 +1,8 @@
 import os
 import multiprocessing as mp
+import atexit
+import zmq
+import asyncio
 from typing import Dict, Optional, Tuple
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.simulator.srt.managers.scheduler import run_scheduler_process
@@ -16,15 +19,76 @@ from sglang.srt.utils import (
     maybe_reindex_device_id,
     numa_utils,
     prepare_model_and_tokenizer,
+    get_zmq_socket,
 )
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
+from sglang.srt.tracing.trace import process_tracing_init, trace_set_thread_info
 from sglang.srt.entrypoints.engine import (
+    Engine,
     _set_envs_and_config,
     logger,
     _init_tokenizer_manager,
 )
 from sglang.simulator.managers.controller import get_simulation_controller
 from sglang.simulator.profiler.profiler import Profiler
+
+
+class EngineSimulator(Engine):
+    def __init__(self, **kwargs):
+        """
+        The arguments of this function is the same as `sglang/srt/server_args.py::ServerArgs`.
+        Please refer to `ServerArgs` for the documentation.
+        """
+
+        # Parse server_args
+        if "server_args" in kwargs:
+            # Directly load server_args
+            server_args = kwargs["server_args"]
+        else:
+            # Construct server_args from kwargs
+            if "log_level" not in kwargs:
+                # Do not print logs by default
+                kwargs["log_level"] = "error"
+            server_args = ServerArgs(**kwargs)
+        self.server_args = server_args
+        logger.info(f"{server_args=}")
+
+        # Shutdown the subprocesses automatically when the program exits
+        atexit.register(self.shutdown)
+
+        # Launch subprocesses
+        tokenizer_manager, template_manager, scheduler_info, port_args = (
+            _launch_subprocesses(server_args=server_args)
+        )
+        self.tokenizer_manager = tokenizer_manager
+        self.template_manager = template_manager
+        self.scheduler_info = scheduler_info
+        self.port_args = port_args
+
+        # Initialize ZMQ sockets
+        context = zmq.Context(2)
+        if self.server_args.node_rank == 0:
+            self.send_to_rpc = get_zmq_socket(
+                context, zmq.DEALER, self.port_args.rpc_ipc_name, True
+            )
+        else:
+            self.send_to_rpc = None
+
+        # Enable tracing
+        if server_args.enable_trace:
+            process_tracing_init(server_args.otlp_traces_endpoint, "sglang")
+            thread_label = "Tokenizer"
+            if server_args.disaggregation_mode == "prefill":
+                thread_label = "Prefill Tokenizer"
+            elif server_args.disaggregation_mode == "decode":
+                thread_label = "Decode Tokenizer"
+            trace_set_thread_info(thread_label)
+
+        try:
+            self.loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
 
 
 def _launch_subprocesses(
