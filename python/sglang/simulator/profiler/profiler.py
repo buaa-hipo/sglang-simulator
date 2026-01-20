@@ -123,7 +123,7 @@ def run_profiler(
             output_file=output_file,
         )
         if profiler._fp:
-            atexit.register(profiler._fp.close)
+            profiler._fp.close()
         profiler.event_loop_normal()
 
     except Exception:
