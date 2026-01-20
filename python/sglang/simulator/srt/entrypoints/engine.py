@@ -194,7 +194,9 @@ def _launch_subprocesses(
     print(f'Controller sending perf...')
     duration = Profiler.profile_time_host(start_time)
     simulator_controller.send_perf(
-        {"_launch_subprocesses": duration}
+        {
+            "event": "_launch_subprocesses",
+            "duration": duration}
     )
 
     return tokenizer_manager, template_manager, scheduler_info, port_args

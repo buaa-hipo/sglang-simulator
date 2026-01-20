@@ -106,7 +106,7 @@ from sglang.srt.managers.scheduler import (
     logger,
 )
 
-from sglang.simulator.managers.controller import get_simulator_controller
+from sglang.simulator.managers.controller import get_simulation_controller
 
 
 class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
@@ -484,7 +484,7 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
     def event_loop_normal(self):
         """A normal scheduler loop."""
 
-        simulator_controller = get_simulator_controller()
+        simulator_controller = get_simulation_controller()
 
         while True:
             recv_reqs = self.recv_requests()
