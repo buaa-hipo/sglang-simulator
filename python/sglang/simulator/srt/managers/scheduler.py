@@ -7,6 +7,8 @@ import psutil
 import threading
 import torch
 import zmq
+import time
+from collections import deque
 from typing import Any
 from sglang.srt.utils import get_zmq_socket
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
@@ -504,7 +506,7 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
         """A normal scheduler loop."""
 
         # simulator_controller = get_simulation_controller()
-        print("Entering event loop.")
+        print("Entering event loop normal.")
 
         while True:
             recv_reqs = self.recv_requests()
@@ -549,85 +551,75 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.self_check_during_busy()
 
-    def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
-        t0 = time.perf_counter()
-        if self.dllm_config is not None:
-            if self.chunked_req is not None and self.chunked_req.finished():
-                self.chunked_req = None
+    def event_loop_overlap(self):
+        print("Entering overlap event loop.")
+        """A scheduler loop that overlaps the CPU processing and GPU computation."""
+        self.result_queue: Deque[Tuple[ScheduleBatch, GenerationBatchResult]] = deque()
+        disable_consecutive_prefill_overlap = (
+            envs.SGLANG_DISABLE_CONSECUTIVE_PREFILL_OVERLAP.get()
+        )
 
-        # Merge the prefill batch into the running batch
-        chunked_req_to_exclude = set()
-        if self.chunked_req:
-            # Move the chunked request out of the batch so that we can merge
-            # only finished requests to running_batch.
-            chunked_req_to_exclude.add(self.chunked_req)
-            self.tree_cache.cache_unfinished_req(self.chunked_req, chunked=True)
-            # chunked request keeps its rid but will get a new req_pool_idx
-            if self.tp_worker.model_runner.mambaish_config is not None:
-                self.req_to_token_pool.free(
-                    self.chunked_req.req_pool_idx, free_mamba_cache=False
-                )
-            else:
-                self.req_to_token_pool.free(self.chunked_req.req_pool_idx)
-        if self.last_batch and self.last_batch.forward_mode.is_extend():
-            if self.last_batch.chunked_req is not None:
-                # In the context pipeline parallelism, after the last chunk, the current microbatch still track outdated chunked_req.
-                # We need to discard it.
-                chunked_req_to_exclude.add(self.last_batch.chunked_req)
+        def pop_and_process():
+            # Process the results of the last batch
+            tmp_batch, tmp_result = self.result_queue.popleft()
+            self.process_batch_result(tmp_batch, tmp_result)
 
-            # Filter batch
-            last_bs = self.last_batch.batch_size()
-            self.last_batch.filter_batch(
-                chunked_req_to_exclude=list(chunked_req_to_exclude)
+        while True:
+            recv_reqs = self.recv_requests()
+            self.process_input_requests(recv_reqs)
+
+            t0 = time.perf_counter()
+
+            if self._engine_paused:
+                continue
+
+            batch = self.get_next_batch_to_run()
+            self.cur_batch = batch
+
+            t1 = time.perf_counter()
+            self.scheduler_send_perf({
+                "event": "host_scheduler_latency",
+                "latency": t1-t0
+            })  # 调度耗时
+
+            disable_overlap_for_batch = (
+                disable_consecutive_prefill_overlap
+                and batch
+                and batch.forward_mode.is_extend()
+                and self.last_batch
+                and self.last_batch.forward_mode.is_extend()
             )
-            if self.last_batch.batch_size() < last_bs:
-                self.running_batch.batch_is_full = False
 
-            # Merge the new batch into the running batch.
-            # For prefill-only batch, we can avoid going through decoding step.
-            if not self.last_batch.is_empty() and not self.last_batch.is_prefill_only:
-                if self.running_batch.is_empty():
-                    self.running_batch = self.last_batch
-                else:
-                    # Merge running_batch with prefill batch
-                    self.running_batch.merge_batch(self.last_batch)
+            # FIXME(lsyin): remove this grammar sync
+            need_grammar_sync = (
+                batch is not None
+                and batch.forward_mode.is_decode()
+                and batch.has_grammar
+                and batch.is_v2_eagle
+                and len(self.result_queue) > 0
+            )
 
-        new_batch = self.get_new_batch_prefill()
+            if disable_overlap_for_batch or need_grammar_sync:
+                pop_and_process()
 
-        need_mlp_sync = self.require_mlp_sync
-        if need_mlp_sync and not self.spec_algorithm.is_none():
-            # NOTE: This branch makes sure prefill and decode batches will not be mixed when spec and dp-attn is enabled.
-            # Before merging the new batch into running batch:
-            # 1. All new batches are none -> need_mlp_sync remains true (sync is needed for decode batch).
-            # 2. All new batches are some (prefill / idle) -> we do not need prepare mlp sync one more time.
-            new_batch = self.prepare_mlp_sync_batch(new_batch)
-            need_mlp_sync = new_batch is None
+            batch_result = None
+            if batch:
+                batch_result = self.run_batch(batch)
+                self.result_queue.append((batch.copy(), batch_result))
 
-        if new_batch is not None:
-            # Run prefill first if possible
-            ret = new_batch
-        else:
-            # Run decode
-            if not self.running_batch.is_empty():
-                self.running_batch = self.update_running_batch(self.running_batch)
-                ret = self.running_batch if not self.running_batch.is_empty() else None
-            else:
-                ret = None
+            if self.last_batch:
+                if not disable_overlap_for_batch and not need_grammar_sync:
+                    pop_and_process()
+            elif batch is None:
+                # When the server is idle, do self-check and re-init some states
+                self.self_check_during_idle()
 
-        # Handle DP attention
-        if need_mlp_sync:
-            ret = self.prepare_mlp_sync_batch(ret)
+            self.launch_batch_sample_if_needed(batch_result)
+            self.last_batch = batch
 
-        if ret:
-            trace_event_batch("schedule", ret.reqs)
+            if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
+                self.self_check_during_busy()
 
-        t1 = time.perf_counter()
-        self.scheduler_send_perf({
-            "event": "host_scheduler_get_next_batch_latency",
-            "latency": t1 - t0
-        })  
-
-        return ret
 
 
 def run_scheduler_process(
