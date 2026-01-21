@@ -568,10 +568,10 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
 
-            t0 = time.perf_counter()
-
             if self._engine_paused:
                 continue
+
+            t0 = time.perf_counter()
 
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
@@ -604,7 +604,13 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
 
             batch_result = None
             if batch:
+                op_start_t = time.perf_counter()
                 batch_result = self.run_batch(batch)
+                op_result_t = time.perf_counter()
+                self.scheduler_send_perf({
+                    "event": "Operator_distribution_processing",
+                    "latency": op_result_t - op_start_t
+                }) 
                 self.result_queue.append((batch.copy(), batch_result))
 
             if self.last_batch:
