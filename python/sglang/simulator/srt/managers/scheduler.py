@@ -629,37 +629,37 @@ def run_scheduler_process(
         if disaggregation_mode == DisaggregationMode.NULL:
             if scheduler.enable_pdmux:
                 scheduler.event_loop_pdmux()
-                print("Scheduler entered pdmux event loop.")
+                logger.warning("Scheduler entered pdmux event loop.")
             elif server_args.pp_size > 1:
                 scheduler.event_loop_pp()
-                print("Scheduler entered pp event loop.")
+                logger.warning("Scheduler entered pp event loop.")
             elif scheduler.enable_overlap:
                 scheduler.event_loop_overlap()
-                print("Scheduler entered overlap event loop.")
+                logger.warning("Scheduler entered overlap event loop.")
             else:
                 scheduler.event_loop_normal()
-                print("Scheduler entered normal event loop.")
+                logger.warning("Scheduler entered normal event loop.")
         elif disaggregation_mode == DisaggregationMode.PREFILL:
             if scheduler.enable_overlap:
                 # TODO: Prefill节点
                 scheduler.event_loop_overlap_disagg_prefill()
-                print("Scheduler entered overlap disagg prefill event loop.")
+                logger.warning("Scheduler entered overlap disagg prefill event loop.")
             else:
                 if server_args.pp_size > 1:
                     scheduler.event_loop_pp_disagg_prefill()
-                    print("Scheduler entered pp disagg prefill event loop.")
+                    logger.warning("Scheduler entered pp disagg prefill event loop.")
                 else:
                     scheduler.event_loop_normal_disagg_prefill()
-                    print("Scheduler entered normal disagg prefill event loop.")
+                    logger.warning("Scheduler entered normal disagg prefill event loop.")
 
         elif disaggregation_mode == DisaggregationMode.DECODE:
             if scheduler.enable_overlap:
                 # TODO: Decode节点
                 scheduler.event_loop_overlap_disagg_decode()
-                print("Scheduler entered overlap disagg decode event loop.")
+                logger.warning("Scheduler entered overlap disagg decode event loop.")
             else:
                 scheduler.event_loop_normal_disagg_decode()
-                print("Scheduler entered normal disagg decode event loop.")
+                logger.warning("Scheduler entered normal disagg decode event loop.")
 
     except Exception:
         traceback = get_exception_traceback()
