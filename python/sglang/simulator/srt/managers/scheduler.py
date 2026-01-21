@@ -125,6 +125,16 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
         profiler_push_ipc_name: str
     ):
 
+        super().__init__(
+            server_args,
+            port_args,
+            gpu_id,
+            tp_rank,
+            moe_ep_rank,
+            pp_rank,
+            dp_rank,
+        )
+
         self.profiler_push_ipc_name = profiler_push_ipc_name
 
         # Parse args
@@ -548,6 +558,27 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
 
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.self_check_during_busy()
+
+    def get_next_batch_to_run(self):
+        t0 = time.perf_counter()
+    
+        batch = super().get_next_batch_to_run()
+        
+        self.scheduler_send_perf({
+            "event": "host_scheduler_latency",
+            "latency": time.perf_counter() - t0
+        })
+        return batch
+    
+    def run_batch(self, batch):
+        start_t = time.perf_counter()
+        result = super().run_batch(batch)
+        
+        self.scheduler_send_perf({
+            "event": "Operator_distribution_processing",
+            "latency": time.perf_counter() - start_t
+        })
+        return result
 
 
 def run_scheduler_process(
