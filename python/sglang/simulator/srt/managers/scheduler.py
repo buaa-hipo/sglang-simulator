@@ -504,6 +504,7 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
         """A normal scheduler loop."""
 
         # simulator_controller = get_simulation_controller()
+        print("Entering event loop.")
 
         while True:
             recv_reqs = self.recv_requests()
