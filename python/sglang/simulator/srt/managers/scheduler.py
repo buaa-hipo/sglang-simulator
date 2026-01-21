@@ -125,16 +125,6 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
         profiler_push_ipc_name: str
     ):
 
-        super().__init__(
-            server_args,
-            port_args,
-            gpu_id,
-            tp_rank,
-            moe_ep_rank,
-            pp_rank,
-            dp_rank,
-        )
-
         self.profiler_push_ipc_name = profiler_push_ipc_name
 
         # Parse args
@@ -559,26 +549,85 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.self_check_during_busy()
 
-    def get_next_batch_to_run(self):
+    def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
         t0 = time.perf_counter()
-    
-        batch = super().get_next_batch_to_run()
-        
+        if self.dllm_config is not None:
+            if self.chunked_req is not None and self.chunked_req.finished():
+                self.chunked_req = None
+
+        # Merge the prefill batch into the running batch
+        chunked_req_to_exclude = set()
+        if self.chunked_req:
+            # Move the chunked request out of the batch so that we can merge
+            # only finished requests to running_batch.
+            chunked_req_to_exclude.add(self.chunked_req)
+            self.tree_cache.cache_unfinished_req(self.chunked_req, chunked=True)
+            # chunked request keeps its rid but will get a new req_pool_idx
+            if self.tp_worker.model_runner.mambaish_config is not None:
+                self.req_to_token_pool.free(
+                    self.chunked_req.req_pool_idx, free_mamba_cache=False
+                )
+            else:
+                self.req_to_token_pool.free(self.chunked_req.req_pool_idx)
+        if self.last_batch and self.last_batch.forward_mode.is_extend():
+            if self.last_batch.chunked_req is not None:
+                # In the context pipeline parallelism, after the last chunk, the current microbatch still track outdated chunked_req.
+                # We need to discard it.
+                chunked_req_to_exclude.add(self.last_batch.chunked_req)
+
+            # Filter batch
+            last_bs = self.last_batch.batch_size()
+            self.last_batch.filter_batch(
+                chunked_req_to_exclude=list(chunked_req_to_exclude)
+            )
+            if self.last_batch.batch_size() < last_bs:
+                self.running_batch.batch_is_full = False
+
+            # Merge the new batch into the running batch.
+            # For prefill-only batch, we can avoid going through decoding step.
+            if not self.last_batch.is_empty() and not self.last_batch.is_prefill_only:
+                if self.running_batch.is_empty():
+                    self.running_batch = self.last_batch
+                else:
+                    # Merge running_batch with prefill batch
+                    self.running_batch.merge_batch(self.last_batch)
+
+        new_batch = self.get_new_batch_prefill()
+
+        need_mlp_sync = self.require_mlp_sync
+        if need_mlp_sync and not self.spec_algorithm.is_none():
+            # NOTE: This branch makes sure prefill and decode batches will not be mixed when spec and dp-attn is enabled.
+            # Before merging the new batch into running batch:
+            # 1. All new batches are none -> need_mlp_sync remains true (sync is needed for decode batch).
+            # 2. All new batches are some (prefill / idle) -> we do not need prepare mlp sync one more time.
+            new_batch = self.prepare_mlp_sync_batch(new_batch)
+            need_mlp_sync = new_batch is None
+
+        if new_batch is not None:
+            # Run prefill first if possible
+            ret = new_batch
+        else:
+            # Run decode
+            if not self.running_batch.is_empty():
+                self.running_batch = self.update_running_batch(self.running_batch)
+                ret = self.running_batch if not self.running_batch.is_empty() else None
+            else:
+                ret = None
+
+        # Handle DP attention
+        if need_mlp_sync:
+            ret = self.prepare_mlp_sync_batch(ret)
+
+        if ret:
+            trace_event_batch("schedule", ret.reqs)
+
+        t1 = time.perf_counter()
         self.scheduler_send_perf({
-            "event": "host_scheduler_latency",
-            "latency": time.perf_counter() - t0
-        })
-        return batch
-    
-    def run_batch(self, batch):
-        start_t = time.perf_counter()
-        result = super().run_batch(batch)
-        
-        self.scheduler_send_perf({
-            "event": "Operator_distribution_processing",
-            "latency": time.perf_counter() - start_t
-        })
-        return result
+            "event": "host_scheduler_get_next_batch_latency",
+            "latency": t1 - t0
+        })  
+
+        return ret
 
 
 def run_scheduler_process(
