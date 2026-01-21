@@ -6,6 +6,8 @@ import signal
 import psutil
 import threading
 import torch
+import zmq
+from sglang.srt.utils import get_zmq_socket
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.server_args import PortArgs, ServerArgs, get_global_server_args
 from sglang.srt.environ import envs
@@ -119,7 +121,11 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
         moe_ep_rank: int,
         pp_rank: int,
         dp_rank: Optional[int],
+        profiler_push_ipc_name: str
     ):
+
+        self.profiler_push_ipc_name = profiler_push_ipc_name
+
         # Parse args
         self.server_args = server_args
         self.tp_rank = tp_rank
@@ -200,6 +206,11 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
         if not self.is_generation:
             self.enable_overlap = False
             logger.info("Overlap scheduler is disabled for embedding models.")
+        
+        context = zmq.Context.instance()
+        self.perf_sender = get_zmq_socket(
+            context, zmq.PUSH, profiler_push_ipc_name, False,  
+        )  # 连接到Profiler进程
 
         # Launch a tensor parallel worker
         # *Simulation
@@ -481,10 +492,17 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
             ]
         )
 
+    def scheduler_send_perf(self, perf: Any):
+        print("scehduler sending perf")
+        try:
+            self.perf_sender.send_pyobj(perf, zmq.NOBLOCK)
+        except zmq.Again:
+            print("Drop perf")
+
     def event_loop_normal(self):
         """A normal scheduler loop."""
 
-        simulator_controller = get_simulation_controller()
+        # simulator_controller = get_simulation_controller()
 
         while True:
             recv_reqs = self.recv_requests()
@@ -501,7 +519,7 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
 
             batch_t = time.perf_counter()
             duration_recv = batch_t - recv_t
-            simulator_controller.send_perf({
+            self.scheduler_send_perf({
                 "event": "host_scheduler_latency",
                 "latency": duration_recv
             })  # 调度耗时
@@ -515,7 +533,7 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
                 print('Scheduler finished processing batch.')
 
                 result_t = time.perf_counter()
-                simulator_controller.send_perf({
+                self.scheduler_send_perf({
                     "event": "Operator_distribution_processing",
                     "latency": result_t - batch_t
                 })   # 算子下发/处理
@@ -539,6 +557,7 @@ def run_scheduler_process(
     pp_rank: int,
     dp_rank: Optional[int],
     pipe_writer,
+    profiler_push_ipc_name: str, 
 ):
     # Generate the logger prefix
     prefix = ""
@@ -594,6 +613,7 @@ def run_scheduler_process(
             moe_ep_rank,
             pp_rank,
             dp_rank,
+            profiler_push_ipc_name = profiler_push_ipc_name,
         )
         pipe_writer.send(
             {

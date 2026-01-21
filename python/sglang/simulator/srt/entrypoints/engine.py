@@ -103,6 +103,7 @@ def _launch_subprocesses(
                             pp_rank,
                             None,
                             writer,
+                            simulator_controller.profiler_push_ipc_name,
                         ),
                     )
                     with memory_saver_adapter.configure_subprocess(), numa_utils.configure_subprocess(
