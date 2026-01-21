@@ -7,7 +7,7 @@ import psutil
 import threading
 import torch
 import zmq
-from typing import Any, Union
+from typing import Any
 from sglang.srt.utils import get_zmq_socket
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.server_args import PortArgs, ServerArgs, get_global_server_args
@@ -500,208 +500,6 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
         except zmq.Again:
             print("Drop perf")
 
-    def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
-        print("Getting next batch to run")
-        if self.dllm_config is not None:
-            if self.chunked_req is not None and self.chunked_req.finished():
-                self.chunked_req = None
-
-        # Merge the prefill batch into the running batch
-        chunked_req_to_exclude = set()
-        if self.chunked_req:
-            # Move the chunked request out of the batch so that we can merge
-            # only finished requests to running_batch.
-            chunked_req_to_exclude.add(self.chunked_req)
-            self.tree_cache.cache_unfinished_req(self.chunked_req, chunked=True)
-            # chunked request keeps its rid but will get a new req_pool_idx
-            if self.tp_worker.model_runner.mambaish_config is not None:
-                self.req_to_token_pool.free(
-                    self.chunked_req.req_pool_idx, free_mamba_cache=False
-                )
-            else:
-                self.req_to_token_pool.free(self.chunked_req.req_pool_idx)
-        if self.last_batch and self.last_batch.forward_mode.is_extend():
-            if self.last_batch.chunked_req is not None:
-                # In the context pipeline parallelism, after the last chunk, the current microbatch still track outdated chunked_req.
-                # We need to discard it.
-                chunked_req_to_exclude.add(self.last_batch.chunked_req)
-
-            # Filter batch
-            last_bs = self.last_batch.batch_size()
-            self.last_batch.filter_batch(
-                chunked_req_to_exclude=list(chunked_req_to_exclude)
-            )
-            if self.last_batch.batch_size() < last_bs:
-                self.running_batch.batch_is_full = False
-
-            # Merge the new batch into the running batch.
-            # For prefill-only batch, we can avoid going through decoding step.
-            if not self.last_batch.is_empty() and not self.last_batch.is_prefill_only:
-                if self.running_batch.is_empty():
-                    self.running_batch = self.last_batch
-                else:
-                    # Merge running_batch with prefill batch
-                    self.running_batch.merge_batch(self.last_batch)
-
-        new_batch = self.get_new_batch_prefill()
-
-        need_mlp_sync = self.require_mlp_sync
-        if need_mlp_sync and not self.spec_algorithm.is_none():
-            # NOTE: This branch makes sure prefill and decode batches will not be mixed when spec and dp-attn is enabled.
-            # Before merging the new batch into running batch:
-            # 1. All new batches are none -> need_mlp_sync remains true (sync is needed for decode batch).
-            # 2. All new batches are some (prefill / idle) -> we do not need prepare mlp sync one more time.
-            new_batch = self.prepare_mlp_sync_batch(new_batch)
-            need_mlp_sync = new_batch is None
-
-        if new_batch is not None:
-            # Run prefill first if possible
-            ret = new_batch
-        else:
-            # Run decode
-            if not self.running_batch.is_empty():
-                self.running_batch = self.update_running_batch(self.running_batch)
-                ret = self.running_batch if not self.running_batch.is_empty() else None
-            else:
-                ret = None
-
-        # Handle DP attention
-        if need_mlp_sync:
-            ret = self.prepare_mlp_sync_batch(ret)
-
-        if ret:
-            trace_event_batch("schedule", ret.reqs)
-
-        return ret
-
-    def run_batch(
-        self, batch: ScheduleBatch
-    ) -> Union[GenerationBatchResult, EmbeddingBatchResult]:
-        """Run a batch."""
-        print("Running batch")
-        self.forward_ct += 1
-
-        # Whether to run the profiler
-        self._profile_batch_predicate(batch)
-        if self.forward_sleep_time is not None:
-            logger.info(f"Scheduler.run_batch sleep {self.forward_sleep_time}s")
-            time.sleep(self.forward_sleep_time)
-
-        # Capture prefill start time for EXTEND mode
-        if batch.forward_mode == ForwardMode.EXTEND:
-            current_time = time.perf_counter()
-            for req in batch.reqs:
-                req.time_stats.prefill_start_time_host = current_time
-
-        # Place holder handling for pd-disagg decode event loop
-        if batch.forward_mode.is_prebuilt():
-            return self._run_batch_prebuilt(batch)
-
-        # Run forward
-        if self.is_generation:
-            batch_or_worker_batch = batch
-
-            if self.enable_overlap or self.spec_algorithm.is_none():
-                # FIXME(lsyin): remove this if and finally unify the abstraction
-                batch_or_worker_batch = batch.get_model_worker_batch()
-
-            if self.enable_overlap:
-                # FIXME: remove this assert
-                assert isinstance(batch_or_worker_batch, ModelWorkerBatch)
-                model_worker_batch = batch_or_worker_batch
-                self.record_batch_in_overlap(model_worker_batch)
-
-                # Sampling info will be modified during forward
-                model_worker_batch.sampling_info = (
-                    model_worker_batch.sampling_info.copy_for_forward()
-                )
-
-                bs = len(model_worker_batch.seq_lens)
-                future_indices = self.future_map.alloc_future_indices(bs)
-
-                with self.forward_stream_ctx:
-                    self.forward_stream.wait_stream(self.default_stream)
-                    self.future_map.resolve_future(model_worker_batch)
-                    batch_result = self.model_worker.forward_batch_generation(
-                        model_worker_batch
-                    )
-                    # FIXME(lsyin): maybe move this to forward_batch_generation
-                    batch_result.copy_done = torch.get_device_module(
-                        self.device
-                    ).Event()
-                    if batch_result.delay_sample_func is None:
-                        self.future_map.store_to_map(future_indices, batch_result)
-                        batch_result.copy_to_cpu(return_logprob=batch.return_logprob)
-                    else:
-                        batch_result.future_indices = future_indices
-
-                # FIXME(lsyin): move this assignment elsewhere
-                future_indices_or_next_token_ids = -future_indices.indices
-
-                if batch.is_v2_eagle:
-                    # FIXME(lsyin): tmp code for eagle v2
-                    # We only keep future indices for next draft input
-
-                    batch.spec_info = batch_result.next_draft_input
-                    batch.spec_info.future_indices = future_indices
-
-                    # batch.spec_info = EagleDraftInput(
-                    #     future_indices=future_indices,
-                    #     verify_done=batch_result.next_draft_input.verify_done,
-                    # )
-
-                    # The future value, usually for next batch preparation
-                    # Current implementation strictly synchronizes the seq_lens
-                    batch.seq_lens = batch_result.next_draft_input.new_seq_lens
-            elif self.enable_pdmux and batch.forward_mode.is_split_prefill():
-                batch_result = self.tp_worker.forward_batch_split_prefill(batch)
-                future_indices_or_next_token_ids = batch_result.next_token_ids
-            else:
-                batch_result = self.model_worker.forward_batch_generation(
-                    batch_or_worker_batch
-                )
-                future_indices_or_next_token_ids = batch_result.next_token_ids
-                self.update_cache_from_scheduler(batch, batch_result)
-
-            # NOTE: future_indices_or_next_token_ids is used in ScheduleBatch,
-            #       which can probably be replaced by future_indices later [TODO(lsyin)].
-            #       we shall still keep the original outputs, e.g. next_token_ids
-            #       in the GenerationBatchOutput for processing after copy_done.
-            batch.output_ids = future_indices_or_next_token_ids
-
-            # These 2 values are needed for processing the output, but the values can be
-            # modified by overlap schedule. So we have to copy them here so that
-            # we can use the correct values in output processing.
-            if batch.return_logprob or self.spec_algorithm.is_eagle():
-                extend_input_len_per_req = [req.extend_input_len for req in batch.reqs]
-            else:
-                extend_input_len_per_req = None
-
-            if batch.return_logprob:
-                extend_logprob_start_len_per_req = [
-                    req.extend_logprob_start_len for req in batch.reqs
-                ]
-            else:
-                extend_logprob_start_len_per_req = None
-
-            batch_result.extend_input_len_per_req = extend_input_len_per_req
-            batch_result.extend_logprob_start_len_per_req = (
-                extend_logprob_start_len_per_req
-            )
-            ret = batch_result
-        else:  # embedding or reward model
-            model_worker_batch = batch.get_model_worker_batch()
-            embeddings = self.tp_worker.forward_batch_embedding(model_worker_batch)
-            ret = EmbeddingBatchResult(embeddings=embeddings)
-
-        # Capture prefill end time for EXTEND mode
-        if batch.forward_mode == ForwardMode.EXTEND:
-            current_time = time.perf_counter()
-            for req in batch.reqs:
-                req.time_stats.prefill_end_time_host = current_time
-
-        return ret
-
     def event_loop_normal(self):
         """A normal scheduler loop."""
 
@@ -831,28 +629,37 @@ def run_scheduler_process(
         if disaggregation_mode == DisaggregationMode.NULL:
             if scheduler.enable_pdmux:
                 scheduler.event_loop_pdmux()
+                print("Scheduler entered pdmux event loop.")
             elif server_args.pp_size > 1:
                 scheduler.event_loop_pp()
+                print("Scheduler entered pp event loop.")
             elif scheduler.enable_overlap:
                 scheduler.event_loop_overlap()
+                print("Scheduler entered overlap event loop.")
             else:
                 scheduler.event_loop_normal()
+                print("Scheduler entered normal event loop.")
         elif disaggregation_mode == DisaggregationMode.PREFILL:
             if scheduler.enable_overlap:
                 # TODO: Prefill节点
                 scheduler.event_loop_overlap_disagg_prefill()
+                print("Scheduler entered overlap disagg prefill event loop.")
             else:
                 if server_args.pp_size > 1:
                     scheduler.event_loop_pp_disagg_prefill()
+                    print("Scheduler entered pp disagg prefill event loop.")
                 else:
                     scheduler.event_loop_normal_disagg_prefill()
+                    print("Scheduler entered normal disagg prefill event loop.")
 
         elif disaggregation_mode == DisaggregationMode.DECODE:
             if scheduler.enable_overlap:
                 # TODO: Decode节点
                 scheduler.event_loop_overlap_disagg_decode()
+                print("Scheduler entered overlap disagg decode event loop.")
             else:
                 scheduler.event_loop_normal_disagg_decode()
+                print("Scheduler entered normal disagg decode event loop.")
 
     except Exception:
         traceback = get_exception_traceback()
