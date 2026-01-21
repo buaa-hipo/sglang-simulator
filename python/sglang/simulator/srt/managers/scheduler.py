@@ -523,10 +523,11 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
 
             batch_t = time.perf_counter()
             duration_recv = batch_t - recv_t
-            self.scheduler_send_perf({
-                "event": "host_scheduler_latency",
-                "latency": duration_recv
-            })  # 调度耗时
+            if batch is not None:
+                self.scheduler_send_perf({
+                    "event": "host_scheduler_latency",
+                    "latency": duration_recv
+                })  # 调度耗时
 
             print(f'Scheduler processing batch of size {0 if batch is None else len(batch.reqs)}')
 
@@ -577,10 +578,11 @@ class SchedulerSimulation(Scheduler):  # 劫持父类，重写其方法
             self.cur_batch = batch
 
             t1 = time.perf_counter()
-            self.scheduler_send_perf({
-                "event": "host_scheduler_latency",
-                "latency": t1-t0
-            })  # 调度耗时
+            if batch is not None:
+                self.scheduler_send_perf({
+                    "event": "host_scheduler_latency",
+                    "latency": t1-t0
+                })  # 调度耗时
 
             disable_overlap_for_batch = (
                 disable_consecutive_prefill_overlap

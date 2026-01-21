@@ -106,11 +106,13 @@ def run_profiler(
     # output_dir = Path(PROFILER_DIR).resolve() / f"simulator_profile{int(time.time())}"
     os.makedirs(output_dir, exist_ok=True)
 
+    time_stamp = str(int(time.time()))
+
     # output_file = output_dir / f"profile_profiler.jsonl"
     # output_dir = os.path.abspath(os.path.normpath(output_dir))
     output_file = os.path.join(
         output_dir,
-        "profile_profiler.jsonl"
+        f"profile_profiler_{time_stamp}.jsonl"
     )
     print(f"Dump profiling data to {output_dir}")
 
