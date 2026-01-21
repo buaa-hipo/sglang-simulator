@@ -1003,6 +1003,7 @@ class Scheduler(
 
     @DynamicGradMode()
     def event_loop_overlap(self):
+        print("Entering overlap event loop.")
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
         self.result_queue: Deque[Tuple[ScheduleBatch, GenerationBatchResult]] = deque()
         disable_consecutive_prefill_overlap = (
